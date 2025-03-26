@@ -1,5 +1,5 @@
 # Start with NVIDIA CUDA 12.4 base image with Python 3.10
-FROM nvidia/cuda:12.4.0-cudnn8-devel-ubuntu22.04
+FROM nvidia/cuda:12.4.1-cudnn8-devel-ubuntu22.04
 
 # Set up environment variables
 ENV DEBIAN_FRONTEND=noninteractive
@@ -52,7 +52,7 @@ RUN mkdir -p /app/food-101 && \
     curl -L -o /app/food-101.tar.gz \
     http://data.vision.ee.ethz.ch/cvl/food-101.tar.gz && \
     tar -xzf /app/food-101.tar.gz -C /app && \
-    rm /app/food-101.tar.gz
+    rm /app/food-101.tar.gz 
 
 # Copy your code into the container
 COPY . /app/
