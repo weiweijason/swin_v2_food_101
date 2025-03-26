@@ -296,7 +296,7 @@ if __name__ == "__main__":
         'waffles'
         ]
 
-   try:
+    try:
         # Initialize process group
         print("Initializing distributed process group...")
         torch.distributed.init_process_group(backend="nccl")
