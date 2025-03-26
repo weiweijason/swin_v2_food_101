@@ -296,56 +296,86 @@ if __name__ == "__main__":
         'waffles'
         ]
 
-    transform = transforms.Compose([
-        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225])
-    ])
-
-    encoder = Label_encoder(LABELS)
-
-    train_df = prepare_dataframe(TRAIN_FILE, IMAGE_ROOT, encoder)
-    test_df = prepare_dataframe(TEST_FILE, IMAGE_ROOT, encoder)
-
-    train_dataset = Food101Dataset(train_df, encoder, transform)
-    test_dataset = Food101Dataset(test_df, encoder, transform)
-
-    train_sampler = DistributedSampler(train_dataset)
-    test_sampler = DistributedSampler(test_dataset)
-
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, sampler=test_sampler)
-
-    num_epochs = 30
-    device = torch.device(f"cuda:{local_rank}")
-
-    # Initialize the SwinV2 model
-    model = swin_transformer_v2_base_classifier(
-        input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
-        window_size=7,
-        num_classes=len(LABELS),
-        use_checkpoint=True
-    )
-    
-    model = model.to(device)
-    model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
-    criterion = nn.CrossEntropyLoss()
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
-
-    best_acc = 0
-    for epoch in range(num_epochs):
-        print(f"\nEpoch {epoch + 1}/{num_epochs}")
-        train_sampler.set_epoch(epoch)
-        train_epoch(model, train_loader, optimizer, scheduler, criterion, device)
-        test_acc = test_epoch(model, test_loader, criterion, device)
-
-        if test_acc > best_acc:
-            best_acc = test_acc
-            if local_rank == 0:
-                torch.save(model.state_dict(), 'swin_v2_model_test.pth')
-
-    if torch.distributed.is_initialized():
-        destroy_process_group()
+   try:
+        # Initialize process group
+        print("Initializing distributed process group...")
+        torch.distributed.init_process_group(backend="nccl")
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        print(f"Process initialized with rank {local_rank}, using device: {device}")
+        
+        BATCH_SIZE = 32
+        IMAGE_SIZE = 224
+        IMAGE_ROOT = "food-101/images"
+        TRAIN_FILE = "food-101/meta/train.txt"
+        TEST_FILE = "food-101/meta/test.txt"
+        
+        # [LABELS definition remains the same]
+        
+        transform = transforms.Compose([
+            transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225])
+        ])
+        
+        encoder = Label_encoder(LABELS)
+        
+        train_df = prepare_dataframe(TRAIN_FILE, IMAGE_ROOT, encoder)
+        test_df = prepare_dataframe(TEST_FILE, IMAGE_ROOT, encoder)
+        
+        train_dataset = Food101Dataset(train_df, encoder, transform)
+        test_dataset = Food101Dataset(test_df, encoder, transform)
+        
+        train_sampler = DistributedSampler(train_dataset)
+        test_sampler = DistributedSampler(test_dataset)
+        
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler)
+        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, sampler=test_sampler)
+        
+        num_epochs = 30
+        
+        # Initialize the SwinV2 model
+        model = swin_transformer_v2_base_classifier(
+            input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
+            window_size=7,
+            num_classes=len(LABELS),
+            use_checkpoint=True
+        )
+        
+        # Explicitly move model to the correct device
+        model = model.to(device)
+        print(f"Model moved to device: {next(model.parameters()).device}")
+        
+        # Wrap with DDP after moving to CUDA
+        model = nn.parallel.DistributedDataParallel(
+            model, 
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=False  # Set to True only if needed
+        )
+        
+        optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
+        criterion = nn.CrossEntropyLoss().to(device)  # Move criterion to device
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+        
+        best_acc = 0
+        for epoch in range(num_epochs):
+            print(f"\nEpoch {epoch + 1}/{num_epochs}")
+            train_sampler.set_epoch(epoch)
+            train_epoch(model, train_loader, optimizer, scheduler, criterion, device)
+            test_acc = test_epoch(model, test_loader, criterion, device)
+            
+            if test_acc > best_acc:
+                best_acc = test_acc
+                if local_rank == 0:  # Only save on rank 0
+                    torch.save(model.state_dict(), 'swin_v2_model_test.pth')
+                    
+    except Exception as e:
+        import traceback
+        print(f"Error in main process: {e}")
+        print(traceback.format_exc())
+    finally:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
