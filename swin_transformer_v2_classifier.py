@@ -141,7 +141,7 @@ class SwinTransformerV2Classifier(nn.Module):
         
         # Apply feature scaling from Swin v2 paper
         # This helps stabilize the feature magnitude during training
-        if hasattr(self, 'feature_scaling'):
+        if hasattr(self, 'feature_scaling') and self.training:
             x = self.feature_scaling(x)
 
         # Classification head
