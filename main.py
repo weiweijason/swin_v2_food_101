@@ -257,6 +257,7 @@ if __name__ == "__main__":
         
         model = model.to(device)
         model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
+        model._set_static_graph()  
 
         optimizer = optim.AdamW(
             model.parameters(),
