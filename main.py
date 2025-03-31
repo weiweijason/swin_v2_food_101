@@ -11,6 +11,7 @@ import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 from torch.distributed import destroy_process_group
+import torch.distributed as dist
 
 # Import the SwinV2 classifier
 from swin_transformer_v2_classifier import swin_transformer_v2_base_classifier
@@ -195,6 +196,8 @@ if __name__ == "__main__":
         torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
         
+        dist.init_process_group(backend='nccl', init_method='env://')
+
         print(f"Process initialized with rank {local_rank}")
 
         BATCH_SIZE = 32
