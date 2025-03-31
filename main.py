@@ -61,7 +61,11 @@ def prepare_dataframe(file_path, image_root, encoder):
             data.append({
                 'label': category,
                 'path': f"{image_root}/{category}/{img_name}.jpg"
+<<<<<<< HEAD
+                })
+=======
             })
+>>>>>>> main
 
     df = pd.DataFrame(data)
     return shuffle(df)
@@ -125,6 +129,16 @@ def generate_cam_swin_v2(model, input_tensor, class_idx=None):
     """
     gradients = []
     activations = []
+<<<<<<< HEAD
+
+    # Register hooks to get gradients and activations from the last stage
+    def forward_hook(module, input, output):
+        activations.append(output)
+
+    def backward_hook(module, grad_input, grad_output):
+        gradients.append(grad_output[0])
+
+=======
     
     # Register hooks to get gradients and activations from the last stage
     def forward_hook(module, input, output):
@@ -133,16 +147,35 @@ def generate_cam_swin_v2(model, input_tensor, class_idx=None):
     def backward_hook(module, grad_input, grad_output):
         gradients.append(grad_output[0])
     
+>>>>>>> main
     # Register hooks on the last stage's last layer
     target_layer = model.backbone.stages[-1].blocks[-1]
     handle_fwd = target_layer.register_forward_hook(forward_hook)
     handle_bwd = target_layer.register_backward_hook(backward_hook)
+<<<<<<< HEAD
+
+=======
     
+>>>>>>> main
     # Forward pass
     model.eval()
     output = model(input_tensor)
     if class_idx is None:
         class_idx = output.argmax(dim=1).item()
+<<<<<<< HEAD
+
+    # Backward pass
+    model.zero_grad()
+    output[:, class_idx].backward()
+
+    # Get gradients and activations
+    grad = gradients[0]
+    act = activations[0]
+
+    # Calculate weights
+    weights = grad.mean(dim=(2, 3), keepdim=True)
+
+=======
     
     # Backward pass
     model.zero_grad()
@@ -155,16 +188,25 @@ def generate_cam_swin_v2(model, input_tensor, class_idx=None):
     # Calculate weights
     weights = grad.mean(dim=(2, 3), keepdim=True)
     
+>>>>>>> main
     # Generate CAM
     cam = (weights * act).sum(dim=1, keepdim=True)
     cam = torch.relu(cam)
     cam = cam - cam.min()
     cam = cam / (cam.max() + 1e-8)
+<<<<<<< HEAD
+
+    # Clean up hooks
+    handle_fwd.remove()
+    handle_bwd.remove()
+
+=======
     
     # Clean up hooks
     handle_fwd.remove()
     handle_bwd.remove()
     
+>>>>>>> main
     return cam[0, 0].detach().cpu().numpy()
 
 
@@ -193,6 +235,59 @@ if __name__ == "__main__":
     TEST_FILE = "food-101/meta/test.txt"
 
     LABELS =  [
+<<<<<<< HEAD
+            'apple_pie',
+            'baby_back_ribs',
+            'baklava',
+            'beef_carpaccio',
+            'beef_tartare',
+            'beet_salad',
+            'beignets',
+            'bibimbap',
+            'bread_pudding',
+            'breakfast_burrito',
+            'bruschetta',
+            'caesar_salad',
+            'cannoli',
+            'caprese_salad',
+            'carrot_cake',
+            'ceviche',
+            'cheese_plate',
+            'cheesecake',
+            'chicken_curry',
+            'chicken_quesadilla',
+            'chicken_wings',
+            'chocolate_cake',
+            'chocolate_mousse',
+            'churros',
+            'clam_chowder',
+            'club_sandwich',
+            'crab_cakes',
+            'creme_brulee',
+            'croque_madame',
+            'cup_cakes',
+            'deviled_eggs',
+            'donuts',
+            'dumplings',
+            'edamame',
+            'eggs_benedict',
+            'escargots',
+            'falafel',
+            'filet_mignon',
+            'fish_and_chips',
+            'foie_gras',
+            'french_fries',
+            'french_onion_soup',
+            'french_toast',
+            'fried_calamari',
+            'fried_rice',
+            'frozen_yogurt',
+            'garlic_bread',
+            'gnocchi',
+            'greek_salad',
+            'grilled_cheese_sandwich',
+    'grilled_salmon',
+=======
         'apple_pie',
         'baby_back_ribs',
         'baklava',
@@ -244,6 +339,7 @@ if __name__ == "__main__":
         'greek_salad',
         'grilled_cheese_sandwich',
         'grilled_salmon',
+>>>>>>> main
         'guacamole',
         'gyoza',
         'hamburger',
@@ -297,6 +393,18 @@ if __name__ == "__main__":
         ]
 
     try:
+<<<<<<< HEAD
+<<<<<<< HEAD
+        # Get the local rank from environment variable
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+
+        print(f"Process initialized with rank {local_rank}")
+
+=======
+=======
+>>>>>>> main
         # Initialize process group
         print("Initializing distributed process group...")
         torch.distributed.init_process_group(backend="nccl")
@@ -305,18 +413,78 @@ if __name__ == "__main__":
         device = torch.device(f"cuda:{local_rank}")
         print(f"Process initialized with rank {local_rank}, using device: {device}")
         
+<<<<<<< HEAD
+>>>>>>> fe1c4933c2c7ab9ee3481f26818a32ad7ff96431
+=======
+>>>>>>> main
         BATCH_SIZE = 32
         IMAGE_SIZE = 224
         IMAGE_ROOT = "food-101/images"
         TRAIN_FILE = "food-101/meta/train.txt"
         TEST_FILE = "food-101/meta/test.txt"
+<<<<<<< HEAD
+<<<<<<< HEAD
+
+        LABELS = [
+                'apple_pie',
+                'baby_back_ribs',
+                # ... rest of your labels ...
+                'waffles'
+                ]
+
+=======
         
         # [LABELS definition remains the same]
         
+>>>>>>> fe1c4933c2c7ab9ee3481f26818a32ad7ff96431
+=======
+        
+        # [LABELS definition remains the same]
+        
+>>>>>>> main
         transform = transforms.Compose([
             transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
+<<<<<<< HEAD
+<<<<<<< HEAD
+                std=[0.229, 0.224, 0.225])
+            ])
+
+        encoder = Label_encoder(LABELS)
+
+        train_df = prepare_dataframe(TRAIN_FILE, IMAGE_ROOT, encoder)
+        test_df = prepare_dataframe(TEST_FILE, IMAGE_ROOT, encoder)
+
+        train_dataset = Food101Dataset(train_df, encoder, transform)
+        test_dataset = Food101Dataset(test_df, encoder, transform)
+
+        train_sampler = DistributedSampler(train_dataset)
+        test_sampler = DistributedSampler(test_dataset)
+
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler)
+        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, sampler=test_sampler)
+
+        num_epochs = 100
+
+        # Initialize the SwinV2 model
+        model = swin_transformer_v2_base_classifier(
+                input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
+                window_size=7,
+                num_classes=len(LABELS),
+                use_checkpoint=True
+                )
+
+        model = model.to(device)
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+
+        optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
+        criterion = nn.CrossEntropyLoss()
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+
+=======
+=======
+>>>>>>> main
                                 std=[0.229, 0.224, 0.225])
         ])
         
@@ -360,22 +528,52 @@ if __name__ == "__main__":
         criterion = nn.CrossEntropyLoss().to(device)  # Move criterion to device
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
         
+<<<<<<< HEAD
+>>>>>>> fe1c4933c2c7ab9ee3481f26818a32ad7ff96431
+=======
+>>>>>>> main
         best_acc = 0
         for epoch in range(num_epochs):
             print(f"\nEpoch {epoch + 1}/{num_epochs}")
             train_sampler.set_epoch(epoch)
             train_epoch(model, train_loader, optimizer, scheduler, criterion, device)
             test_acc = test_epoch(model, test_loader, criterion, device)
+<<<<<<< HEAD
+<<<<<<< HEAD
+
+            if test_acc > best_acc:
+                best_acc = test_acc
+                if local_rank == 0:
+                    torch.save(model.state_dict(), 'swin_v2_model_test.pth')
+
+=======
+=======
+>>>>>>> main
             
             if test_acc > best_acc:
                 best_acc = test_acc
                 if local_rank == 0:  # Only save on rank 0
                     torch.save(model.state_dict(), 'swin_v2_model_test.pth')
                     
+<<<<<<< HEAD
+>>>>>>> fe1c4933c2c7ab9ee3481f26818a32ad7ff96431
+=======
+>>>>>>> main
     except Exception as e:
         import traceback
         print(f"Error in main process: {e}")
         print(traceback.format_exc())
     finally:
+<<<<<<< HEAD
+<<<<<<< HEAD
+        # Cleanup
+        if torch.distributed.is_initialized():
+            destroy_process_group()
+=======
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
+>>>>>>> fe1c4933c2c7ab9ee3481f26818a32ad7ff96431
+=======
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+>>>>>>> main
