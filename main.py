@@ -14,6 +14,7 @@ from torch.distributed import destroy_process_group
 import torch.distributed as dist
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from timm.scheduler.cosine_lr import CosineLRScheduler
+import torch.optim as optim
 
 # Import the SwinV2 classifier
 from swin_transformer_v2_classifier import swin_transformer_v2_base_classifier
