@@ -79,6 +79,11 @@ class SwinTransformerV2Classifier(nn.Module):
         
         # Initialize weights
         self.apply(self._init_weights)
+
+        self.feature_scaling = nn.Sequential(
+            nn.BatchNorm1d(feature_dim, affine=False),  # Use feature_dim from your model
+            nn.Identity()  # Place for additional scaling if needed
+        )
     
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -117,7 +122,7 @@ class SwinTransformerV2Classifier(nn.Module):
         x = self.norm(x)
         
         # Global average pooling
-        x = x.mean(dim=[1, 2])  # B, C
+        x = x.reshape(B, H * W, C).mean(dim=1)  # B, C
         
         return x
     
@@ -130,6 +135,11 @@ class SwinTransformerV2Classifier(nn.Module):
         # Extract features
         x = self.forward_features(x)
         
+        # Apply feature scaling from Swin v2 paper
+        # This helps stabilize the feature magnitude during training
+        if hasattr(self, 'feature_scaling') and self.training:
+            x = self.feature_scaling(x)
+
         # Classification head
         x = self.head(x)
         

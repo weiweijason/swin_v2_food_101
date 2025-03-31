@@ -12,6 +12,8 @@ import cv2
 import matplotlib.pyplot as plt
 from torch.distributed import destroy_process_group
 import torch.distributed as dist
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from timm.scheduler.cosine_lr import CosineLRScheduler
 
 # Import the SwinV2 classifier
 from swin_transformer_v2_classifier import swin_transformer_v2_base_classifier
@@ -81,8 +83,11 @@ def train_epoch(model, dataloader, optimizer, scheduler, criterion, device):
         outputs = model(inputs)
         loss = criterion(outputs, targets)
         loss.backward()
+        
+        # Apply gradient clipping after backward pass but before optimizer step
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+        
         optimizer.step()
-        scheduler.step()
 
         total_loss += loss.item()
         _, predicted = outputs.max(1)
@@ -91,6 +96,11 @@ def train_epoch(model, dataloader, optimizer, scheduler, criterion, device):
 
     accuracy = 100. * correct / total
     print(f"Train Loss: {total_loss / len(dataloader):.3f} | Train Accuracy: {accuracy:.2f}%")
+    
+    # Correct - stepping scheduler once per epoch
+    scheduler.step()
+    
+    return accuracy  # It's helpful to return the accuracy for monitoring
 
 
 def test_epoch(model, dataloader, criterion, device):
@@ -247,9 +257,13 @@ if __name__ == "__main__":
         model = model.to(device)
         model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
 
-        optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
-        criterion = nn.CrossEntropyLoss()
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=5e-5,  # Lower initial learning rate for v2
+            weight_decay=0.05  # Higher weight decay for v2
+        )
+        criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+        scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs)
 
         best_acc = 0
         for epoch in range(num_epochs):

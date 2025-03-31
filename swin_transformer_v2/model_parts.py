@@ -142,8 +142,13 @@ class WindowMultiHeadAttention(nn.Module):
             nn.Linear(in_features=2, out_features=meta_network_hidden_features, bias=True),
             nn.ReLU(inplace=True),
             nn.Linear(in_features=meta_network_hidden_features, out_features=number_of_heads, bias=True))
+
+        # Add initialization for the meta network weights
+        nn.init.trunc_normal_(self.meta_network[0].weight, std=.02)
+        nn.init.trunc_normal_(self.meta_network[2].weight, std=.02)
+        
         # Init tau
-        self.register_parameter("tau", torch.nn.Parameter(torch.ones(1, number_of_heads, 1, 1)))
+        self.register_parameter("tau", torch.nn.Parameter(torch.log(10 * torch.ones((1, number_of_heads, 1, 1)))))
         # Init pair-wise relative positions (log-spaced)
         self.__make_pair_wise_relative_positions()
 
@@ -202,12 +207,15 @@ class WindowMultiHeadAttention(nn.Module):
         :param mask: (Optional[torch.Tensor]) Attention mask for the shift case
         :return: (torch.Tensor) Output feature map of the shape [batch size * windows, tokens, channels]
         """
-        # Compute attention map with scaled cosine attention
-        attention_map: torch.Tensor = torch.einsum("bhqd, bhkd -> bhqk", query, key) \
-                                      / torch.maximum(torch.norm(query, dim=-1, keepdim=True)
-                                                      * torch.norm(key, dim=-1, keepdim=True).transpose(-2, -1),
-                                                      torch.tensor(1e-06, device=query.device, dtype=query.dtype))
-        attention_map: torch.Tensor = attention_map / self.tau.clamp(min=0.01)
+        # Update the normalization calculation for better numerical stability
+        query_norm = torch.norm(query, dim=-1, keepdim=True)
+        key_norm = torch.norm(key, dim=-1, keepdim=True)
+
+        # Compute attention with scaled cosine attention
+        attention_map = torch.einsum("bhqd, bhkd -> bhqk", query, key)
+        attention_map = attention_map / torch.clamp(query_norm * key_norm.transpose(-2, -1), min=1e-6)
+        attention_map = attention_map / self.tau.clamp(min=0.01)
+
         # Apply relative positional encodings
         attention_map: torch.Tensor = attention_map + self.__get_relative_positional_encodings()
         # Apply mask if utilized
@@ -437,6 +445,10 @@ class SwinTransformerBlock(nn.Module):
         """
         # Save shape
         batch_size, channels, height, width = input.shape  # type: int, int, int, int
+
+        # CHANGE 1: Apply normalization BEFORE attention (Pre-LN pattern)
+        normalized_input = self.normalization_1(input.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
         # Shift input if utilized
         if self.shift_size > 0:
             output_shift: torch.Tensor = torch.roll(input=input, shifts=(-self.shift_size, -self.shift_size),
@@ -457,16 +469,20 @@ class SwinTransformerBlock(nn.Module):
                                                     dims=(-1, -2))
         else:
             output_shift: torch.Tensor = output_merge
-        # Perform normalization
-        output_normalize: torch.Tensor = self.normalization_1(output_shift.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
-        # Skip connection
-        output_skip: torch.Tensor = self.dropout(output_normalize) + input
+        
+        # CHANGE 2: Skip connection with original input (not normalized input)
+        output_skip: torch.Tensor = self.dropout(output_shift) + input
+
+        # CHANGE 3: Apply normalization BEFORE feed-forward network
+        normalized_skip = self.normalization_2(output_skip.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        
         # Feed forward network, normalization and skip connection
         output_feed_forward: torch.Tensor = self.feed_forward_network(
             output_skip.view(batch_size, channels, -1).permute(0, 2, 1)).permute(0, 2, 1)
         output_feed_forward: torch.Tensor = output_feed_forward.view(batch_size, channels, height, width)
-        output_normalize: torch.Tensor = bhwc_to_bchw(self.normalization_2(bchw_to_bhwc(output_feed_forward)))
-        output: torch.Tensor = output_skip + self.dropout(output_normalize)
+
+        # CHANGE 4: Skip connection with output from first MSA block
+        output: torch.Tensor = output_skip + self.dropout(output_feed_forward)
         return output
 
 
