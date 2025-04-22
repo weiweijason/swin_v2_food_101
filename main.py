@@ -234,8 +234,8 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
     accuracy = 100. * correct / total
     print(f"Train Loss: {total_loss / len(dataloader):.3f} | Train Accuracy: {accuracy:.2f}%")
     
-    # 更新調度器
-    scheduler.step(epoch=None)  # CosineLRScheduler從timm不需要傳入epoch參數
+    # 更新調度器 - 不傳入任何參數給 scheduler.step()
+    scheduler.step()
     
     return accuracy
 
