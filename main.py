@@ -16,9 +16,12 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from timm.scheduler.cosine_lr import CosineLRScheduler
 import torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast
+import torch.nn.functional as F
+import glob
+from sklearn.cluster import KMeans
 
 # Import the SwinV2 classifier
-from swin_transformer_v2_classifier import swin_transformer_v2_base_classifier
+from swin_transformer_v2_classifier import swin_transformer_v2_base_classifier, swin_transformer_v2_base_simclr
 
 # Updated Label Encoder
 class Label_encoder:
@@ -240,6 +243,220 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
     return accuracy
 
 
+# Social Event Dataset for SimCLR
+class SocialEventDataset(Dataset):
+    def __init__(self, image_folder, transform=None, two_views_transform=None):
+        """
+        Dataset for Social Event Images with SimCLR approach
+        :param image_folder: (str) Folder containing images
+        :param transform: (callable) Single view transformation
+        :param two_views_transform: (callable) Two views transformation for contrastive learning
+        """
+        self.image_paths = self._get_image_paths(image_folder)
+        self.transform = transform
+        self.two_views_transform = two_views_transform
+    
+    def _get_image_paths(self, folder):
+        """Find all image files in the folder"""
+        image_extensions = ['*.jpg', '*.jpeg', '*.png']
+        all_images = []
+        
+        for ext in image_extensions:
+            all_images.extend(glob.glob(os.path.join(folder, ext)))
+        
+        print(f"Found {len(all_images)} images in {folder}")
+        return all_images
+    
+    def __len__(self):
+        return len(self.image_paths)
+    
+    def __getitem__(self, idx):
+        """Return two augmented versions of the same image for contrastive learning"""
+        img_path = self.image_paths[idx]
+        image = Image.open(img_path).convert("RGB")
+        
+        if self.two_views_transform is not None:
+            # Get two differently augmented views of the same image
+            view1 = self.two_views_transform(image)
+            view2 = self.two_views_transform(image)
+            return view1, view2
+        elif self.transform is not None:
+            # Single transformation (for evaluation)
+            return self.transform(image)
+        else:
+            return image
+
+
+# NT-Xent Loss for Contrastive Learning
+class NT_Xent(nn.Module):
+    def __init__(self, batch_size, temperature=0.5):
+        """
+        NT-Xent loss for contrastive learning as used in SimCLR
+        :param batch_size: (int) Batch size
+        :param temperature: (float) Temperature parameter to scale the similarity scores
+        """
+        super(NT_Xent, self).__init__()
+        self.batch_size = batch_size
+        self.temperature = temperature
+        
+        # Create a mask to filter out positive samples from the loss calculation
+        self.mask = self._get_correlated_mask().cuda()
+        self.criterion = nn.CrossEntropyLoss(reduction="sum")
+        self.similarity_f = nn.CosineSimilarity(dim=2)
+
+    def _get_correlated_mask(self):
+        """Create a mask to identify positive pairs"""
+        diag = np.eye(2 * self.batch_size)
+        l1 = np.eye(2 * self.batch_size, k=-self.batch_size)
+        l2 = np.eye(2 * self.batch_size, k=self.batch_size)
+        mask = torch.from_numpy((diag + l1 + l2))
+        mask = (1 - mask).bool()
+        return mask
+
+    def forward(self, z_i, z_j):
+        """
+        Calculate NT-Xent loss
+        :param z_i: (torch.Tensor) Representations of first views
+        :param z_j: (torch.Tensor) Representations of second views
+        :return: (torch.Tensor) NT-Xent loss
+        """
+        # Concatenate views
+        representations = torch.cat([z_i, z_j], dim=0)
+        
+        # Matrix multiplication to get similarity matrix
+        similarity_matrix = F.cosine_similarity(representations.unsqueeze(1), representations.unsqueeze(0), dim=2)
+        
+        # Filter out the positive pairs (diagonal elements)
+        l_pos = torch.diag(similarity_matrix, self.batch_size)
+        r_pos = torch.diag(similarity_matrix, -self.batch_size)
+        positives = torch.cat([l_pos, r_pos]).view(2 * self.batch_size, 1)
+        
+        # Filter out the diagonal elements
+        negative_mask = self.mask.clone()
+        if negative_mask.device != similarity_matrix.device:
+            negative_mask = negative_mask.to(similarity_matrix.device)
+            
+        negatives = similarity_matrix[negative_mask].view(2 * self.batch_size, -1)
+        
+        # Concat positive and negative pairs
+        logits = torch.cat([positives, negatives], dim=1)
+        
+        # Labels: positives are at index 0
+        labels = torch.zeros(2 * self.batch_size).cuda().long()
+        
+        # Scale by temperature
+        logits = logits / self.temperature
+        
+        # Calculate cross entropy loss
+        loss = self.criterion(logits, labels)
+        
+        # Normalize the loss
+        loss = loss / (2 * self.batch_size)
+        
+        return loss
+
+
+# Training functions for contrastive learning
+def train_epoch_simclr(model, dataloader, optimizer, criterion, device, scaler):
+    """
+    Training function for SimCLR contrastive learning
+    :param model: (nn.Module) SimCLR model
+    :param dataloader: (DataLoader) Dataloader for contrastive pairs
+    :param optimizer: (Optimizer) Optimizer
+    :param criterion: (nn.Module) Contrastive loss function
+    :param device: (torch.device) Device to use
+    :param scaler: (GradScaler) Gradient scaler for mixed precision training
+    :return: (float) Average loss for the epoch
+    """
+    model.train()
+    total_loss = 0
+    
+    for views in tqdm(dataloader, desc="Training"):
+        # Get two views of the same images
+        view1, view2 = views
+        view1, view2 = view1.to(device), view2.to(device)
+        
+        # Zero the gradients
+        optimizer.zero_grad()
+        
+        # Use mixed precision for forward pass
+        with autocast():
+            # Get embeddings
+            z_i = model(view1)
+            z_j = model(view2)
+            
+            # Calculate loss
+            loss = criterion(z_i, z_j)
+        
+        # Scale loss and do backward pass
+        scaler.scale(loss).backward()
+        
+        # Apply gradient clipping
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+        
+        # Update parameters
+        scaler.step(optimizer)
+        scaler.update()
+        
+        total_loss += loss.item()
+    
+    avg_loss = total_loss / len(dataloader)
+    print(f"Train Loss: {avg_loss:.4f}")
+    return avg_loss
+
+
+# Evaluation function for feature extraction and clustering
+def evaluate_clustering(model, dataloader, device, n_clusters=10):
+    """
+    Evaluate the learned representations through K-means clustering
+    :param model: (nn.Module) SimCLR model
+    :param dataloader: (DataLoader) Dataloader for evaluation
+    :param device: (torch.device) Device to use
+    :param n_clusters: (int) Number of clusters for K-means
+    :return: (dict) Dictionary with evaluation metrics
+    """
+    model.eval()
+    features = []
+    
+    with torch.no_grad():
+        for images in tqdm(dataloader, desc="Extracting Features"):
+            # For evaluation, we use single view
+            images = images.to(device)
+            
+            # Get features (before projection head)
+            feat = model.forward_features(images)
+            
+            # Store features
+            features.append(feat.cpu().numpy())
+    
+    # Concatenate all features
+    features = np.concatenate(features, axis=0)
+    
+    # Apply K-means clustering
+    kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(features)
+    
+    # Calculate silhouette score if there are enough samples
+    if len(features) > n_clusters:
+        from sklearn.metrics import silhouette_score
+        silhouette_avg = silhouette_score(features, kmeans.labels_)
+    else:
+        silhouette_avg = 0.0
+    
+    # Calculate inertia (sum of squared distances to closest centroid)
+    inertia = kmeans.inertia_
+    
+    # Return metrics
+    metrics = {
+        'n_clusters': n_clusters,
+        'silhouette_score': silhouette_avg,
+        'inertia': inertia
+    }
+    
+    print(f"Clustering Metrics: {metrics}")
+    return metrics
+
+
 # Main Program
 if __name__ == "__main__":
     # NOTE: The process group is initialized by torchrun automatically
@@ -451,6 +668,169 @@ if __name__ == "__main__":
                 if local_rank == 0:
                     torch.save(model.state_dict(), 'swin_v2_model_test.pth')
     
+    except Exception as e:
+        import traceback
+        print(f"Error in main process: {e}")
+        print(traceback.format_exc())
+    finally:
+        # Cleanup
+        if torch.distributed.is_initialized():
+            destroy_process_group()
+
+    try:
+        # Get the local rank from environment variable
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        
+        # Initialize distributed process group if not already done
+        if not torch.distributed.is_initialized():
+            dist.init_process_group(backend='nccl', init_method='env://')
+
+        print(f"Process initialized with rank {local_rank}")
+
+        # Parameters
+        BATCH_SIZE = 64
+        IMAGE_SIZE = 224
+        IMAGE_ROOT = "social_event_dataset"  # Folder containing Social Event images
+        PROJECTION_DIM = 128
+        
+        # Define transformations for contrastive learning
+        # Two separate strong augmentations for contrastive learning
+        two_views_transform = transforms.Compose([
+            transforms.RandomResizedCrop(IMAGE_SIZE, scale=(0.2, 1.0)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        
+        # Less aggressive transformation for evaluation
+        eval_transform = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(IMAGE_SIZE),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+        # Create datasets
+        train_dataset = SocialEventDataset(
+            image_folder=IMAGE_ROOT, 
+            two_views_transform=two_views_transform
+        )
+        
+        eval_dataset = SocialEventDataset(
+            image_folder=IMAGE_ROOT,
+            transform=eval_transform
+        )
+
+        # Create samplers for distributed training
+        train_sampler = DistributedSampler(train_dataset)
+        eval_sampler = DistributedSampler(eval_dataset, shuffle=False)
+
+        # Create dataloaders
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=BATCH_SIZE, 
+            sampler=train_sampler,
+            num_workers=4,
+            pin_memory=True
+        )
+        
+        eval_loader = DataLoader(
+            eval_dataset,
+            batch_size=BATCH_SIZE,
+            sampler=eval_sampler,
+            num_workers=4,
+            pin_memory=True
+        )
+
+        # Number of epochs
+        num_epochs = 100
+
+        # Initialize SimCLR model
+        model = swin_transformer_v2_base_simclr(
+            input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
+            window_size=7,
+            projection_dim=PROJECTION_DIM,
+            use_checkpoint=True
+        )
+        
+        model = model.to(device)
+        model = nn.parallel.DistributedDataParallel(
+            model, 
+            device_ids=[local_rank], 
+            find_unused_parameters=True
+        )
+        model._set_static_graph()  
+
+        # Initialize NT-Xent loss
+        criterion = NT_Xent(batch_size=BATCH_SIZE, temperature=0.07)
+        
+        # Initialize optimizer
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=3e-4,
+            weight_decay=0.05  # High weight decay for better regularization
+        )
+        
+        # Learning rate scheduler
+        scheduler = CosineLRScheduler(
+            optimizer,
+            t_initial=num_epochs,
+            lr_min=1e-6,
+            warmup_t=10,  # 10 epochs of warmup
+            warmup_lr_init=1e-7
+        )
+        
+        # Initialize gradient scaler for mixed precision training
+        scaler = GradScaler()
+        
+        # Training loop
+        for epoch in range(num_epochs):
+            print(f"\nEpoch {epoch + 1}/{num_epochs}")
+            
+            # Set epoch for distributed sampler
+            train_sampler.set_epoch(epoch)
+            
+            # Train for one epoch
+            train_loss = train_epoch_simclr(model, train_loader, optimizer, criterion, device, scaler)
+            
+            # Update learning rate
+            scheduler.step(epoch)
+            
+            # Save model checkpoint (only on main process)
+            if local_rank == 0 and (epoch + 1) % 10 == 0:
+                torch.save(
+                    {
+                        'epoch': epoch,
+                        'model_state_dict': model.module.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                    }, 
+                    f'swin_v2_simclr_epoch_{epoch+1}.pth'
+                )
+            
+            # Evaluate with clustering (every 10 epochs)
+            if (epoch + 1) % 10 == 0:
+                evaluate_clustering(model.module, eval_loader, device)
+                
+        # Final evaluation with different cluster counts
+        if local_rank == 0:
+            print("\nFinal Evaluation with Different Cluster Counts")
+            for n_clusters in [5, 10, 15, 20]:
+                evaluate_clustering(model.module, eval_loader, device, n_clusters=n_clusters)
+                
+            # Save final model
+            torch.save(
+                {
+                    'epoch': num_epochs,
+                    'model_state_dict': model.module.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                }, 
+                'swin_v2_simclr_final.pth'
+            )
+                
     except Exception as e:
         import traceback
         print(f"Error in main process: {e}")
