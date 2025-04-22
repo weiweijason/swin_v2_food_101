@@ -15,6 +15,7 @@ import torch.distributed as dist
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from timm.scheduler.cosine_lr import CosineLRScheduler
 import torch.optim as optim
+from torch.cuda.amp import GradScaler, autocast
 
 # Import the SwinV2 classifier
 from swin_transformer_v2_classifier import swin_transformer_v2_base_classifier
@@ -196,6 +197,49 @@ def visualize_cam(image, cam):
     return overlay
 
 
+def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, scaler):
+    """
+    使用混合精度訓練的訓練函數，可加速訓練並降低記憶體使用量
+    """
+    model.train()
+    total_loss = 0
+    correct = 0
+    total = 0
+
+    for inputs, targets in tqdm(dataloader, desc="Training"):
+        inputs, targets = inputs.to(device), targets.to(device)
+        optimizer.zero_grad()
+        
+        # 使用混合精度前向傳播
+        with autocast():
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+        
+        # 使用GradScaler處理反向傳播
+        scaler.scale(loss).backward()
+        
+        # 在更新前應用梯度裁剪
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+        
+        # 更新參數
+        scaler.step(optimizer)
+        scaler.update()
+
+        total_loss += loss.item()
+        _, predicted = outputs.max(1)
+        total += targets.size(0)
+        correct += predicted.eq(targets).sum().item()
+
+    accuracy = 100. * correct / total
+    print(f"Train Loss: {total_loss / len(dataloader):.3f} | Train Accuracy: {accuracy:.2f}%")
+    
+    # 更新調度器
+    scheduler.step(epoch=None)  # CosineLRScheduler從timm不需要傳入epoch參數
+    
+    return accuracy
+
+
 # Main Program
 if __name__ == "__main__":
     # NOTE: The process group is initialized by torchrun automatically
@@ -211,7 +255,7 @@ if __name__ == "__main__":
 
         print(f"Process initialized with rank {local_rank}")
 
-        BATCH_SIZE = 32
+        BATCH_SIZE = 64  # 從原本的32增加到64
         IMAGE_SIZE = 224
         IMAGE_ROOT = "food-101/images"
         TRAIN_FILE = "food-101/meta/train.txt"
@@ -220,12 +264,121 @@ if __name__ == "__main__":
         LABELS = [
             'apple_pie',
             'baby_back_ribs',
-            # ... rest of your labels ...
+            'baklava',
+            'beef_carpaccio',
+            'beef_tartare',
+            'beet_salad',
+            'beignets',
+            'bibimbap',
+            'bread_pudding',
+            'breakfast_burrito',
+            'bruschetta',
+            'caesar_salad',
+            'cannoli',
+            'caprese_salad',
+            'carrot_cake',
+            'ceviche',
+            'cheesecake',
+            'cheese_plate',
+            'chicken_curry',
+            'chicken_quesadilla',
+            'chicken_wings',
+            'chocolate_cake',
+            'chocolate_mousse',
+            'churros',
+            'clam_chowder',
+            'club_sandwich',
+            'crab_cakes',
+            'creme_brulee',
+            'croque_madame',
+            'cup_cakes',
+            'deviled_eggs',
+            'donuts',
+            'dumplings',
+            'edamame',
+            'eggs_benedict',
+            'escargots',
+            'falafel',
+            'filet_mignon',
+            'fish_and_chips',
+            'foie_gras',
+            'french_fries',
+            'french_onion_soup',
+            'french_toast',
+            'fried_calamari',
+            'fried_rice',
+            'frozen_yogurt',
+            'garlic_bread',
+            'gnocchi',
+            'greek_salad',
+            'grilled_cheese_sandwich',
+            'grilled_salmon',
+            'guacamole',
+            'gyoza',
+            'hamburger',
+            'hot_and_sour_soup',
+            'hot_dog',
+            'huevos_rancheros',
+            'hummus',
+            'ice_cream',
+            'lasagna',
+            'lobster_bisque',
+            'lobster_roll_sandwich',
+            'macaroni_and_cheese',
+            'macarons',
+            'miso_soup',
+            'mussels',
+            'nachos',
+            'omelette',
+            'onion_rings',
+            'oysters',
+            'pad_thai',
+            'paella',
+            'pancakes',
+            'panna_cotta',
+            'peking_duck',
+            'pho',
+            'pizza',
+            'pork_chop',
+            'poutine',
+            'prime_rib',
+            'pulled_pork_sandwich',
+            'ramen',
+            'ravioli',
+            'red_velvet_cake',
+            'risotto',
+            'samosa',
+            'sashimi',
+            'scallops',
+            'seaweed_salad',
+            'shrimp_and_grits',
+            'spaghetti_bolognese',
+            'spaghetti_carbonara',
+            'spring_rolls',
+            'steak',
+            'strawberry_shortcake',
+            'sushi',
+            'tacos',
+            'takoyaki',
+            'tiramisu',
+            'tuna_tartare',
             'waffles'
         ]
 
         transform = transforms.Compose([
             transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+            transforms.RandomResizedCrop(IMAGE_SIZE),
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225])
+        ])
+
+        # 強化版資料增強的測試集轉換
+        transform_test = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(IMAGE_SIZE),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                 std=[0.229, 0.224, 0.225])
@@ -237,7 +390,8 @@ if __name__ == "__main__":
         test_df = prepare_dataframe(TEST_FILE, IMAGE_ROOT, encoder)
 
         train_dataset = Food101Dataset(train_df, encoder, transform)
-        test_dataset = Food101Dataset(test_df, encoder, transform)
+        # 更新測試資料集使用適合測試的轉換
+        test_dataset = Food101Dataset(test_df, encoder, transform_test)
 
         train_sampler = DistributedSampler(train_dataset)
         test_sampler = DistributedSampler(test_dataset)
@@ -259,19 +413,37 @@ if __name__ == "__main__":
         model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
         model._set_static_graph()  
 
+        # 使用分層學習率，為骨幹和分類頭設置不同的學習率
+        parameters = [
+            {'params': [p for n, p in model.named_parameters() if 'backbone' in n], 'lr': 1e-5},  # 骨幹網路較低學習率
+            {'params': [p for n, p in model.named_parameters() if 'head' in n], 'lr': 5e-5}  # 分類頭較高學習率
+        ]
+        
         optimizer = optim.AdamW(
-            model.parameters(),
-            lr=5e-5,  # Lower initial learning rate for v2
-            weight_decay=0.05  # Higher weight decay for v2
+            parameters,
+            weight_decay=0.05  # 較高的權重衰減以提供更好的正則化
         )
+        
+        # 加入標籤平滑提高泛化能力
         criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-        scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs)
+        
+        # 使用更先進的學習率調度器
+        scheduler = CosineLRScheduler(
+            optimizer,
+            t_initial=num_epochs,
+            lr_min=1e-6,
+            warmup_t=5,  # 5個epochs的預熱期
+            warmup_lr_init=1e-7
+        )
 
+        # 初始化混合精度訓練的scaler
+        scaler = GradScaler()
+        
         best_acc = 0
         for epoch in range(num_epochs):
             print(f"\nEpoch {epoch + 1}/{num_epochs}")
             train_sampler.set_epoch(epoch)
-            train_epoch(model, train_loader, optimizer, scheduler, criterion, device)
+            train_acc = train_epoch_amp(model, train_loader, optimizer, scheduler, criterion, device, scaler)
             test_acc = test_epoch(model, test_loader, criterion, device)
 
             if test_acc > best_acc:
