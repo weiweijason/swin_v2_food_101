@@ -16,9 +16,57 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from timm.scheduler.cosine_lr import CosineLRScheduler
 import torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast
+import logging
+import sys
+import time
+from datetime import datetime
+from torch.utils.tensorboard import SummaryWriter
 
 # Import the SwinV2 classifier
 from swin_transformer_v2_classifier import swin_transformer_v2_base_classifier
+
+# 設置日誌格式
+def setup_logger(local_rank):
+    # 創建日誌格式
+    log_format = '%(asctime)s - %(levelname)s - Rank[%(rank)s] - %(message)s'
+    date_format = '%Y-%m-%d %H:%M:%S'
+    
+    # 創建一個自定義的過濾器，添加rank信息
+    class RankFilter(logging.Filter):
+        def __init__(self, rank):
+            super().__init__()
+            self.rank = rank
+            
+        def filter(self, record):
+            record.rank = self.rank
+            return True
+    
+    # 建立logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    logger.handlers = []  # 清空任何現有的處理器
+    
+    # 添加過濾器
+    rank_filter = RankFilter(local_rank)
+    logger.addFilter(rank_filter)
+    
+    # 創建格式
+    formatter = logging.Formatter(log_format, date_format)
+    
+    # 添加控制台處理器
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    
+    # 只在主進程(rank 0)添加文件處理器，避免多個進程同時寫入文件
+    if local_rank == 0:
+        # 使用日期時間來命名日誌文件
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_handler = logging.FileHandler(f'training_{timestamp}.log')
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    
+    return logger
 
 # Updated Label Encoder
 class Label_encoder:
@@ -105,7 +153,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, criterion, device):
     return accuracy  # It's helpful to return the accuracy for monitoring
 
 
-def test_epoch(model, dataloader, criterion, device):
+def test_epoch(model, dataloader, criterion, device, logger):
     model.eval()
     total_loss = 0
     correct = 0
@@ -123,8 +171,9 @@ def test_epoch(model, dataloader, criterion, device):
             correct += predicted.eq(targets).sum().item()
 
     accuracy = 100. * correct / total
-    print(f"Test Loss: {total_loss / len(dataloader):.3f} | Test Accuracy: {accuracy:.2f}%")
-    return accuracy
+    avg_loss = total_loss / len(dataloader)
+    logger.info(f"Test Loss: {avg_loss:.3f} | Test Accuracy: {accuracy:.2f}%")
+    return accuracy, avg_loss
 
 
 # Generate CAM for Swin Transformer V2
@@ -197,7 +246,7 @@ def visualize_cam(image, cam):
     return overlay
 
 
-def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, scaler, epoch):
+def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, scaler, epoch, logger):
     """
     使用混合精度訓練的訓練函數，可加速訓練並降低記憶體使用量
     """
@@ -232,12 +281,13 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
         correct += predicted.eq(targets).sum().item()
 
     accuracy = 100. * correct / total
-    print(f"Train Loss: {total_loss / len(dataloader):.3f} | Train Accuracy: {accuracy:.2f}%")
+    avg_loss = total_loss / len(dataloader)
+    logger.info(f"Train Loss: {avg_loss:.3f} | Train Accuracy: {accuracy:.2f}%")
     
     # 更新調度器 - 傳入epoch參數
     scheduler.step(epoch)
     
-    return accuracy
+    return accuracy, avg_loss
 
 
 # Main Program
@@ -254,6 +304,9 @@ if __name__ == "__main__":
         dist.init_process_group(backend='nccl', init_method='env://')
 
         print(f"Process initialized with rank {local_rank}")
+
+        # 設置日誌
+        logger = setup_logger(local_rank)
 
         BATCH_SIZE = 64  # 從原本的32增加到64
         IMAGE_SIZE = 224
@@ -439,17 +492,37 @@ if __name__ == "__main__":
         # 初始化混合精度訓練的scaler
         scaler = GradScaler()
         
+        # 在主進程上初始化TensorBoard writer
+        if local_rank == 0:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            tensorboard_dir = f'runs/swin_v2_food101_{timestamp}'
+            writer = SummaryWriter(log_dir=tensorboard_dir)
+            logger.info(f"TensorBoard log directory: {tensorboard_dir}")
+        
         best_acc = 0
         for epoch in range(num_epochs):
-            print(f"\nEpoch {epoch + 1}/{num_epochs}")
+            logger.info(f"\nEpoch {epoch + 1}/{num_epochs}")
             train_sampler.set_epoch(epoch)
-            train_acc = train_epoch_amp(model, train_loader, optimizer, scheduler, criterion, device, scaler, epoch)
-            test_acc = test_epoch(model, test_loader, criterion, device)
-
+            train_acc, train_loss = train_epoch_amp(model, train_loader, optimizer, scheduler, criterion, device, scaler, epoch, logger)
+            test_acc, test_loss = test_epoch(model, test_loader, criterion, device, logger)
+            
+            # 在主進程上記錄到TensorBoard
+            if local_rank == 0:
+                # 記錄訓練和測試指標
+                writer.add_scalar('Loss/train', train_loss, epoch)
+                writer.add_scalar('Loss/test', test_loss, epoch)
+                writer.add_scalar('Accuracy/train', train_acc, epoch)
+                writer.add_scalar('Accuracy/test', test_acc, epoch)
+                
+                # 記錄學習率
+                for i, param_group in enumerate(optimizer.param_groups):
+                    writer.add_scalar(f'Learning_rate/group_{i}', param_group['lr'], epoch)
+            
             if test_acc > best_acc:
                 best_acc = test_acc
                 if local_rank == 0:
                     torch.save(model.state_dict(), 'swin_v2_model_test.pth')
+                    logger.info(f"New best model saved with accuracy: {test_acc:.2f}%")
     
     except Exception as e:
         import traceback
