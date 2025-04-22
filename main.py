@@ -16,6 +16,10 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from timm.scheduler.cosine_lr import CosineLRScheduler
 import torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast
+import argparse
+import requests
+import shutil
+from pathlib import Path
 
 # Import the SwinV2 classifier
 from swin_transformer_v2_classifier import swin_transformer_v2_base_classifier
@@ -240,222 +244,315 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
     return accuracy
 
 
+def download_pretrained_model(url, save_path):
+    """
+    Download pretrained model from URL
+    
+    :param url: URL to download the model from
+    :param save_path: Path to save the downloaded model
+    :return: Path to the downloaded model
+    """
+    save_dir = os.path.dirname(save_path)
+    os.makedirs(save_dir, exist_ok=True)
+    
+    if os.path.exists(save_path):
+        print(f"Pretrained model already exists at {save_path}")
+        return save_path
+    
+    print(f"Downloading pretrained model from {url}")
+    
+    # Stream the download to avoid loading the whole file into memory
+    with requests.get(url, stream=True) as r:
+        r.raise_for_status()
+        with open(save_path, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+    
+    print(f"Downloaded pretrained model to {save_path}")
+    return save_path
+
+
+def freeze_backbone_layers(model, num_layers_to_freeze=None):
+    """
+    Freeze layers in the backbone of the model
+    
+    :param model: The model to freeze layers in
+    :param num_layers_to_freeze: Number of layers to freeze (None freezes all backbone)
+    """
+    # For DDP model, access the module attribute
+    if hasattr(model, 'module'):
+        backbone = model.module.backbone
+    else:
+        backbone = model.backbone
+    
+    # Count total layers in backbone
+    total_stages = len(backbone.stages)
+    
+    if num_layers_to_freeze is None or num_layers_to_freeze >= total_stages:
+        # Freeze all backbone layers
+        for param in backbone.parameters():
+            param.requires_grad = False
+        print(f"Froze all backbone layers")
+    else:
+        # Freeze specific number of stages from the beginning
+        for i in range(num_layers_to_freeze):
+            for param in backbone.stages[i].parameters():
+                param.requires_grad = False
+        print(f"Froze first {num_layers_to_freeze} stages of the backbone")
+    
+    # Keep the classification head trainable
+    if hasattr(model, 'module'):
+        for param in model.module.head.parameters():
+            param.requires_grad = True
+    else:
+        for param in model.head.parameters():
+            param.requires_grad = True
+
+
+def unfreeze_all_layers(model):
+    """
+    Unfreeze all layers in the model
+    
+    :param model: The model to unfreeze
+    """
+    for param in model.parameters():
+        param.requires_grad = True
+    print("Unfroze all layers in the model")
+
+
+# Parse command line arguments
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train SwinV2 on Food-101 dataset')
+    
+    # Dataset arguments
+    parser.add_argument('--data-dir', type=str, default='food-101', 
+                        help='Path to the Food-101 dataset')
+    parser.add_argument('--image-size', type=int, default=224, 
+                        help='Input image size')
+    
+    # Model arguments
+    parser.add_argument('--model-type', type=str, default='base', choices=['tiny', 'small', 'base', 'large'],
+                        help='SwinV2 model type')
+    parser.add_argument('--pretrained', action='store_true', 
+                        help='Use pretrained ImageNet weights')
+    parser.add_argument('--pretrained-path', type=str, default=None,
+                        help='Path to pretrained weights file')
+    parser.add_argument('--imagenet-pretrained-url', type=str, 
+                        default='https://github.com/SwinTransformer/storage/releases/download/v2.0.0/swinv2_base_patch4_window12to16_192to256_22kto1k_ft.pth',
+                        help='URL to download ImageNet pretrained weights')
+    
+    # Training arguments
+    parser.add_argument('--batch-size', type=int, default=64, 
+                        help='Batch size per GPU')
+    parser.add_argument('--epochs', type=int, default=110, 
+                        help='Number of epochs to train')
+    parser.add_argument('--lr', type=float, default=5e-5, 
+                        help='Base learning rate')
+    parser.add_argument('--backbone-lr', type=float, default=1e-5, 
+                        help='Learning rate for backbone')
+    parser.add_argument('--weight-decay', type=float, default=0.05, 
+                        help='Weight decay')
+    parser.add_argument('--amp', action='store_true', default=True,
+                        help='Use mixed precision training')
+    
+    # Transfer learning arguments
+    parser.add_argument('--freeze-backbone', action='store_true', 
+                        help='Freeze backbone layers')
+    parser.add_argument('--freeze-layers', type=int, default=None,
+                        help='Number of backbone layers to freeze')
+    parser.add_argument('--progressive-unfreeze', action='store_true', 
+                        help='Progressively unfreeze layers during training')
+    parser.add_argument('--unfreeze-epoch', type=int, default=50,
+                        help='Epoch to unfreeze all layers if progressive unfreeze is enabled')
+    
+    # Output arguments
+    parser.add_argument('--output-dir', type=str, default='./outputs',
+                        help='Path to save outputs')
+    parser.add_argument('--save-interval', type=int, default=10,
+                        help='Save checkpoint every N epochs')
+    
+    return parser.parse_args()
+
+
 # Main Program
 if __name__ == "__main__":
-    # NOTE: The process group is initialized by torchrun automatically
-    # DO NOT initialize it again with torch.distributed.init_process_group()
+    # 解析命令行參數
+    args = parse_args()
     
-    try:
-        # Get the local rank from environment variable
-        local_rank = int(os.environ["LOCAL_RANK"])
-        torch.cuda.set_device(local_rank)
-        device = torch.device(f"cuda:{local_rank}")
-        
+    # 設置設備
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f"cuda:{local_rank}")
+    
+    # 初始化分散式訓練
+    if torch.distributed.is_available() and not torch.distributed.is_initialized():
         dist.init_process_group(backend='nccl', init_method='env://')
-
-        print(f"Process initialized with rank {local_rank}")
-
-        BATCH_SIZE = 64  # 從原本的32增加到64
-        IMAGE_SIZE = 224
-        IMAGE_ROOT = "food-101/images"
-        TRAIN_FILE = "food-101/meta/train.txt"
-        TEST_FILE = "food-101/meta/test.txt"
-
-        LABELS = [
-            'apple_pie',
-            'baby_back_ribs',
-            'baklava',
-            'beef_carpaccio',
-            'beef_tartare',
-            'beet_salad',
-            'beignets',
-            'bibimbap',
-            'bread_pudding',
-            'breakfast_burrito',
-            'bruschetta',
-            'caesar_salad',
-            'cannoli',
-            'caprese_salad',
-            'carrot_cake',
-            'ceviche',
-            'cheesecake',
-            'cheese_plate',
-            'chicken_curry',
-            'chicken_quesadilla',
-            'chicken_wings',
-            'chocolate_cake',
-            'chocolate_mousse',
-            'churros',
-            'clam_chowder',
-            'club_sandwich',
-            'crab_cakes',
-            'creme_brulee',
-            'croque_madame',
-            'cup_cakes',
-            'deviled_eggs',
-            'donuts',
-            'dumplings',
-            'edamame',
-            'eggs_benedict',
-            'escargots',
-            'falafel',
-            'filet_mignon',
-            'fish_and_chips',
-            'foie_gras',
-            'french_fries',
-            'french_onion_soup',
-            'french_toast',
-            'fried_calamari',
-            'fried_rice',
-            'frozen_yogurt',
-            'garlic_bread',
-            'gnocchi',
-            'greek_salad',
-            'grilled_cheese_sandwich',
-            'grilled_salmon',
-            'guacamole',
-            'gyoza',
-            'hamburger',
-            'hot_and_sour_soup',
-            'hot_dog',
-            'huevos_rancheros',
-            'hummus',
-            'ice_cream',
-            'lasagna',
-            'lobster_bisque',
-            'lobster_roll_sandwich',
-            'macaroni_and_cheese',
-            'macarons',
-            'miso_soup',
-            'mussels',
-            'nachos',
-            'omelette',
-            'onion_rings',
-            'oysters',
-            'pad_thai',
-            'paella',
-            'pancakes',
-            'panna_cotta',
-            'peking_duck',
-            'pho',
-            'pizza',
-            'pork_chop',
-            'poutine',
-            'prime_rib',
-            'pulled_pork_sandwich',
-            'ramen',
-            'ravioli',
-            'red_velvet_cake',
-            'risotto',
-            'samosa',
-            'sashimi',
-            'scallops',
-            'seaweed_salad',
-            'shrimp_and_grits',
-            'spaghetti_bolognese',
-            'spaghetti_carbonara',
-            'spring_rolls',
-            'steak',
-            'strawberry_shortcake',
-            'sushi',
-            'tacos',
-            'takoyaki',
-            'tiramisu',
-            'tuna_tartare',
-            'waffles'
-        ]
-
-        transform = transforms.Compose([
-            transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-            transforms.RandomResizedCrop(IMAGE_SIZE),
-            transforms.RandomHorizontalFlip(),
-            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.2),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                std=[0.229, 0.224, 0.225])
-        ])
-
-        # 強化版資料增強的測試集轉換
-        transform_test = transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(IMAGE_SIZE),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                std=[0.229, 0.224, 0.225])
-        ])
-
-        encoder = Label_encoder(LABELS)
-
-        train_df = prepare_dataframe(TRAIN_FILE, IMAGE_ROOT, encoder)
-        test_df = prepare_dataframe(TEST_FILE, IMAGE_ROOT, encoder)
-
-        train_dataset = Food101Dataset(train_df, encoder, transform)
-        # 更新測試資料集使用適合測試的轉換
-        test_dataset = Food101Dataset(test_df, encoder, transform_test)
-
-        train_sampler = DistributedSampler(train_dataset)
-        test_sampler = DistributedSampler(test_dataset)
-
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler)
-        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, sampler=test_sampler)
-
-        num_epochs = 110
-
-        # Initialize the SwinV2 model
-        model = swin_transformer_v2_base_classifier(
-            input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
-            window_size=7,
-            num_classes=len(LABELS),
-            use_checkpoint=True
-        )
-        
-        model = model.to(device)
-        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
-        model._set_static_graph()  
-
-        # 使用分層學習率，為骨幹和分類頭設置不同的學習率
-        parameters = [
-            {'params': [p for n, p in model.named_parameters() if 'backbone' in n], 'lr': 1e-5},  # 骨幹網路較低學習率
-            {'params': [p for n, p in model.named_parameters() if 'head' in n], 'lr': 5e-5}  # 分類頭較高學習率
-        ]
-        
-        optimizer = optim.AdamW(
-            parameters,
-            weight_decay=0.05  # 較高的權重衰減以提供更好的正則化
-        )
-        
-        # 加入標籤平滑提高泛化能力
-        criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-        
-        # 使用更先進的學習率調度器
-        scheduler = CosineLRScheduler(
-            optimizer,
-            t_initial=num_epochs,
-            lr_min=1e-6,
-            warmup_t=5,  # 5個epochs的預熱期
-            warmup_lr_init=1e-7
-        )
-
-        # 初始化混合精度訓練的scaler
-        scaler = GradScaler()
-        
-        best_acc = 0
-        for epoch in range(num_epochs):
-            print(f"\nEpoch {epoch + 1}/{num_epochs}")
-            train_sampler.set_epoch(epoch)
-            train_acc = train_epoch_amp(model, train_loader, optimizer, scheduler, criterion, device, scaler)
-            test_acc = test_epoch(model, test_loader, criterion, device)
-
-            if test_acc > best_acc:
-                best_acc = test_acc
-                if local_rank == 0:
-                    torch.save(model.state_dict(), 'swin_v2_model_test.pth')
     
-    except Exception as e:
-        import traceback
-        print(f"Error in main process: {e}")
-        print(traceback.format_exc())
-    finally:
-        # Cleanup
-        if torch.distributed.is_initialized():
-            destroy_process_group()
+    print(f"Process initialized with rank {local_rank}")
+    
+    # 設定目錄
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # 設定資料集參數
+    IMAGE_ROOT = os.path.join(args.data_dir, "images")
+    TRAIN_FILE = os.path.join(args.data_dir, "meta/train.txt")
+    TEST_FILE = os.path.join(args.data_dir, "meta/test.txt")
+    
+    # 定義 Food-101 類別標籤
+    LABELS = [
+        'apple_pie', 'baby_back_ribs', 'baklava', 'beef_carpaccio',
+        'beef_tartare', 'beet_salad', 'beignets', 'bibimbap',
+        # ... 省略其餘類別 ...
+        'tacos', 'takoyaki', 'tiramisu', 'tuna_tartare', 'waffles'
+    ]
+    
+    # 數據轉換
+    transform_train = transforms.Compose([
+        transforms.Resize((args.image_size, args.image_size)),
+        transforms.RandomResizedCrop(args.image_size),
+        transforms.RandomHorizontalFlip(),
+        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.2),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    
+    transform_test = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(args.image_size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    
+    # 準備資料集
+    encoder = Label_encoder(LABELS)
+    train_df = prepare_dataframe(TRAIN_FILE, IMAGE_ROOT, encoder)
+    test_df = prepare_dataframe(TEST_FILE, IMAGE_ROOT, encoder)
+    
+    train_dataset = Food101Dataset(train_df, encoder, transform_train)
+    test_dataset = Food101Dataset(test_df, encoder, transform_test)
+    
+    train_sampler = DistributedSampler(train_dataset)
+    test_sampler = DistributedSampler(test_dataset)
+    
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=train_sampler)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, sampler=test_sampler)
+    
+    # 下載預訓練模型（如果需要）
+    pretrained_path = None
+    if args.pretrained:
+        if args.pretrained_path:
+            pretrained_path = args.pretrained_path
+        else:
+            pretrained_dir = os.path.join(args.output_dir, "pretrained")
+            os.makedirs(pretrained_dir, exist_ok=True)
+            pretrained_path = os.path.join(pretrained_dir, "swinv2_imagenet_pretrained.pth")
+            download_pretrained_model(args.imagenet_pretrained_url, pretrained_path)
+    
+    # 初始化模型
+    model = swin_transformer_v2_base_classifier(
+        input_resolution=(args.image_size, args.image_size),
+        window_size=7,
+        num_classes=len(LABELS),
+        use_checkpoint=True,
+        pretrained_path=pretrained_path  # 使用預訓練權重
+    )
+    
+    # 將模型移至 GPU
+    model = model.to(device)
+    
+    # 應用層凍結（如果需要）
+    if args.freeze_backbone:
+        freeze_backbone_layers(model, args.freeze_layers)
+    
+    # 分散式數據並行
+    model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
+    model._set_static_graph()
+    
+    # 使用分層學習率，為骨幹和分類頭設置不同的學習率
+    parameters = [
+        {'params': [p for n, p in model.named_parameters() if 'backbone' in n and p.requires_grad], 'lr': args.backbone_lr},
+        {'params': [p for n, p in model.named_parameters() if 'head' in n and p.requires_grad], 'lr': args.lr}
+    ]
+    
+    optimizer = optim.AdamW(
+        parameters,
+        weight_decay=args.weight_decay
+    )
+    
+    # 標籤平滑
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    
+    # 學習率調度器
+    scheduler = CosineLRScheduler(
+        optimizer,
+        t_initial=args.epochs,
+        lr_min=1e-6,
+        warmup_t=5,
+        warmup_lr_init=1e-7
+    )
+    
+    # 初始化混合精度訓練的 scaler
+    scaler = GradScaler() if args.amp else None
+    
+    # 訓練循環
+    best_acc = 0
+    for epoch in range(args.epochs):
+        print(f"\nEpoch {epoch + 1}/{args.epochs}")
+        
+        # 設置采樣器 epoch
+        train_sampler.set_epoch(epoch)
+        
+        # 逐步解凍（如果啟用）
+        if args.progressive_unfreeze and epoch == args.unfreeze_epoch:
+            if local_rank == 0:
+                print(f"Unfreezing all layers at epoch {epoch + 1}")
+            unfreeze_all_layers(model)
+        
+        # 訓練和測試
+        if args.amp:
+            train_acc = train_epoch_amp(model, train_loader, optimizer, scheduler, criterion, device, scaler)
+        else:
+            train_acc = train_epoch(model, train_loader, optimizer, scheduler, criterion, device)
+            
+        test_acc = test_epoch(model, test_loader, criterion, device)
+        
+        # 保存最佳模型
+        if test_acc > best_acc and local_rank == 0:
+            best_acc = test_acc
+            model_save_path = os.path.join(args.output_dir, f"swinv2_food101_best.pth")
+            if hasattr(model, 'module'):
+                model_state = model.module.state_dict()
+            else:
+                model_state = model.state_dict()
+            torch.save({
+                'epoch': epoch,
+                'model': model_state,
+                'optimizer': optimizer.state_dict(),
+                'scheduler': scheduler.state_dict(),
+                'best_acc': best_acc,
+            }, model_save_path)
+            print(f"Saved best model with accuracy {best_acc:.2f}% to {model_save_path}")
+        
+        # 定期保存檢查點
+        if (epoch + 1) % args.save_interval == 0 and local_rank == 0:
+            checkpoint_path = os.path.join(args.output_dir, f"swinv2_food101_checkpoint_{epoch + 1}.pth")
+            if hasattr(model, 'module'):
+                model_state = model.module.state_dict()
+            else:
+                model_state = model.state_dict()
+            torch.save({
+                'epoch': epoch,
+                'model': model_state,
+                'optimizer': optimizer.state_dict(),
+                'scheduler': scheduler.state_dict(),
+                'best_acc': best_acc,
+            }, checkpoint_path)
+            print(f"Saved checkpoint at epoch {epoch + 1} to {checkpoint_path}")
+    
+    # 結束訓練
+    if local_rank == 0:
+        print(f"Training completed. Best accuracy: {best_acc:.2f}%")
+    
+    # 清理
+    if torch.distributed.is_initialized():
+        destroy_process_group()

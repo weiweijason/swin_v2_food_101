@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, List, Union, Any
+from typing import Tuple, List, Union, Any, Dict, Optional
 import numpy as np
+import os
 
 # Import SwinTransformerV2 model and components from repository
 from swin_transformer_v2.model import SwinTransformerV2, swin_transformer_v2_b
@@ -89,6 +90,53 @@ class SwinTransformerV2Classifier(nn.Module):
             nn.Identity()
         )
     
+    def load_pretrained_weights(self, pretrained_path: str, strict: bool = False, num_classes: Optional[int] = None) -> None:
+        """
+        Load pretrained weights from a checkpoint file.
+        
+        :param pretrained_path: Path to the pretrained model checkpoint
+        :param strict: Whether to strictly enforce that the keys in state_dict match the keys in model
+        :param num_classes: Optional new number of classes (if None, keeps the current model's num_classes)
+        """
+        if not os.path.exists(pretrained_path):
+            raise FileNotFoundError(f"Pretrained weights file not found at {pretrained_path}")
+        
+        print(f"Loading pretrained weights from {pretrained_path}")
+        
+        # Load the pretrained state dict
+        state_dict = torch.load(pretrained_path, map_location='cpu')
+        
+        # Handle different state_dict formats
+        if 'model' in state_dict:
+            state_dict = state_dict['model']
+        elif 'state_dict' in state_dict:
+            state_dict = state_dict['state_dict']
+            
+        # Filter out incompatible keys (especially the head) if num_classes is different
+        if num_classes is not None and num_classes != self.head.out_features:
+            # Save the original head's out_features
+            original_out_features = self.head.out_features
+            
+            # Create a new head with the desired number of classes
+            in_features = self.head.in_features
+            self.head = nn.Linear(in_features, num_classes)
+            
+            # Remove the head parameters from the state_dict
+            state_dict = {k: v for k, v in state_dict.items() if 'head' not in k}
+            
+            print(f"Replaced classification head: {original_out_features} -> {num_classes} classes")
+        
+        # Load the state dict
+        result = self.load_state_dict(state_dict, strict=strict)
+        
+        # Print missing and unexpected keys
+        if len(result.missing_keys) > 0:
+            print(f"Missing keys: {result.missing_keys}")
+        if len(result.unexpected_keys) > 0:
+            print(f"Unexpected keys: {result.unexpected_keys}")
+            
+        print(f"Successfully loaded pretrained weights from {pretrained_path}")
+    
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             nn.init.trunc_normal_(m.weight, std=.02)
@@ -155,7 +203,8 @@ def swin_transformer_v2_base_classifier(input_resolution: Tuple[int, int] = (224
                                        in_channels: int = 3,
                                        num_classes: int = 1000,
                                        use_checkpoint: bool = False,
-                                       sequential_self_attention: bool = False) -> SwinTransformerV2Classifier:
+                                       sequential_self_attention: bool = False,
+                                       pretrained_path: Optional[str] = None) -> SwinTransformerV2Classifier:
     """
     Creates a Swin Transformer V2 Base model for classification
     :param input_resolution: (Tuple[int, int]) Input resolution
@@ -164,16 +213,22 @@ def swin_transformer_v2_base_classifier(input_resolution: Tuple[int, int] = (224
     :param num_classes: (int) Number of classes
     :param use_checkpoint: (bool) Use checkpointing
     :param sequential_self_attention: (bool) Use sequential self-attention
+    :param pretrained_path: (Optional[str]) Path to pretrained weights
     :return: (SwinTransformerV2Classifier) SwinV2 classifier
     """
-    return SwinTransformerV2Classifier(
+    model = SwinTransformerV2Classifier(
         in_channels=in_channels,
-        embedding_channels=192,
+        embedding_channels=128,
         depths=(2, 2, 18, 2),
         input_resolution=input_resolution,
-        number_of_heads=(6,12,24,48),
+        number_of_heads=(4, 8, 16, 32),
         window_size=window_size,
         num_classes=num_classes,
         use_checkpoint=use_checkpoint,
         sequential_self_attention=sequential_self_attention
     )
+    
+    if pretrained_path is not None:
+        model.load_pretrained_weights(pretrained_path, strict=False, num_classes=num_classes)
+    
+    return model
