@@ -168,10 +168,10 @@ def swin_transformer_v2_base_classifier(input_resolution: Tuple[int, int] = (224
     """
     return SwinTransformerV2Classifier(
         in_channels=in_channels,
-        embedding_channels=352,
+        embedding_channels=192,
         depths=(2, 2, 18, 2),
         input_resolution=input_resolution,
-        number_of_heads=(11,22,44,88),
+        number_of_heads=(6,12,24,48),
         window_size=window_size,
         num_classes=num_classes,
         use_checkpoint=use_checkpoint,
