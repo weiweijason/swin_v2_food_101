@@ -23,3 +23,8 @@ Thumbs.db
 # Ignore IDE project files
 .idea/
 .vscode/
+
+# custom ignores
+*.zip
+food-101_ZIP/
+outputs/
