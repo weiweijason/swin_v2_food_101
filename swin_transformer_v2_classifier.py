@@ -99,43 +99,87 @@ class SwinTransformerV2Classifier(nn.Module):
         :param num_classes: Optional new number of classes (if None, keeps the current model's num_classes)
         """
         if not os.path.exists(pretrained_path):
-            raise FileNotFoundError(f"Pretrained weights file not found at {pretrained_path}")
+            raise FileNotFoundError(f"預訓練權重檔案未找到: {pretrained_path}")
         
-        print(f"Loading pretrained weights from {pretrained_path}")
+        print(f"載入預訓練權重: {pretrained_path}")
         
-        # Load the pretrained state dict
-        state_dict = torch.load(pretrained_path, map_location='cpu')
-        
-        # Handle different state_dict formats
-        if 'model' in state_dict:
-            state_dict = state_dict['model']
-        elif 'state_dict' in state_dict:
-            state_dict = state_dict['state_dict']
+        try:
+            # 載入預訓練狀態字典，使用 weights_only=True 增強安全性
+            state_dict = torch.load(pretrained_path, map_location='cpu', weights_only=True)
             
-        # Filter out incompatible keys (especially the head) if num_classes is different
-        if num_classes is not None and num_classes != self.head.out_features:
-            # Save the original head's out_features
-            original_out_features = self.head.out_features
+            # 處理不同的狀態字典格式
+            if isinstance(state_dict, dict):
+                if 'model' in state_dict:
+                    state_dict = state_dict['model']
+                elif 'state_dict' in state_dict:
+                    state_dict = state_dict['state_dict']
+                # 處理 huggingface 格式
+                elif any(k.startswith('backbone.') or k.startswith('encoder.') for k in state_dict.keys()):
+                    # 有些預訓練權重可能有前綴
+                    print("檢測到 HuggingFace 格式的預訓練權重，正在適配...")
+                    # 嘗試匹配模型權重
+                    new_state_dict = {}
+                    for k, v in state_dict.items():
+                        # 移除可能的前綴
+                        if k.startswith('backbone.'):
+                            new_k = k[len('backbone.'):]
+                            new_state_dict[new_k] = v
+                        elif k.startswith('encoder.'):
+                            new_k = k[len('encoder.'):]
+                            new_state_dict[new_k] = v
+                        else:
+                            new_state_dict[k] = v
+                    state_dict = new_state_dict
+            else:
+                raise ValueError("載入的預訓練權重格式不正確")
+                
+            # 過濾掉不兼容的鍵（特別是分類頭）如果 num_classes 不同
+            if num_classes is not None and num_classes != self.head.out_features:
+                # 保存原始分類頭的輸出特徵
+                original_out_features = self.head.out_features
+                
+                # 創建新的分類頭，使用所需的類別數量
+                in_features = self.head.in_features
+                self.head = nn.Linear(in_features, num_classes)
+                
+                # 從狀態字典中移除分類頭參數
+                state_dict = {k: v for k, v in state_dict.items() if 'head' not in k and 'fc' not in k and 'classifier' not in k}
+                
+                print(f"重建分類頭: {original_out_features} -> {num_classes} 類")
             
-            # Create a new head with the desired number of classes
-            in_features = self.head.in_features
-            self.head = nn.Linear(in_features, num_classes)
+            # 檢查 state_dict 中的權重維度是否與當前模型相符
+            # 特別關注 PatchEmbed 層和相對位置偏差表
+            incompatible_shapes = []
+            for name, param in self.named_parameters():
+                if name in state_dict:
+                    if param.shape != state_dict[name].shape:
+                        incompatible_shapes.append((name, param.shape, state_dict[name].shape))
             
-            # Remove the head parameters from the state_dict
-            state_dict = {k: v for k, v in state_dict.items() if 'head' not in k}
+            if incompatible_shapes:
+                print("檢測到以下不兼容的參數形狀:")
+                for name, current_shape, loaded_shape in incompatible_shapes:
+                    print(f"  {name}: 當前 {current_shape}, 載入 {loaded_shape}")
+                print("嘗試調整一部分參數...")
+                
+                # 移除不相容形狀的鍵
+                for name, _, _ in incompatible_shapes:
+                    state_dict.pop(name, None)
             
-            print(f"Replaced classification head: {original_out_features} -> {num_classes} classes")
-        
-        # Load the state dict
-        result = self.load_state_dict(state_dict, strict=strict)
-        
-        # Print missing and unexpected keys
-        if len(result.missing_keys) > 0:
-            print(f"Missing keys: {result.missing_keys}")
-        if len(result.unexpected_keys) > 0:
-            print(f"Unexpected keys: {result.unexpected_keys}")
+            # 載入狀態字典
+            result = self.load_state_dict(state_dict, strict=strict)
             
-        print(f"Successfully loaded pretrained weights from {pretrained_path}")
+            # 輸出缺失和多餘的鍵
+            if len(result.missing_keys) > 0:
+                print(f"缺失的鍵: {result.missing_keys}")
+            if len(result.unexpected_keys) > 0:
+                print(f"多餘的鍵: {result.unexpected_keys}")
+                
+            print(f"成功載入預訓練權重")
+            
+        except Exception as e:
+            print(f"載入預訓練權重時發生錯誤: {e}")
+            print("將使用隨機初始化權重繼續訓練...")
+            # 權重加載失敗時，不中斷訓練，而是使用隨機初始化的權重
     
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):

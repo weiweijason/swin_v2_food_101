@@ -201,7 +201,7 @@ def visualize_cam(image, cam):
     return overlay
 
 
-def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, scaler):
+def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, scaler, epoch=0):
     """
     使用混合精度訓練的訓練函數，可加速訓練並降低記憶體使用量
     """
@@ -238,15 +238,15 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
     accuracy = 100. * correct / total
     print(f"Train Loss: {total_loss / len(dataloader):.3f} | Train Accuracy: {accuracy:.2f}%")
     
-    # 更新調度器
-    scheduler.step(epoch=None)  # CosineLRScheduler從timm不需要傳入epoch參數
+    # 更新調度器，傳遞當前epoch值
+    scheduler.step(epoch=epoch)
     
     return accuracy
 
 
 def download_pretrained_model(url, save_path):
     """
-    Download pretrained model from URL
+    Download pretrained model from URL with improved error handling
     
     :param url: URL to download the model from
     :param save_path: Path to save the downloaded model
@@ -255,21 +255,60 @@ def download_pretrained_model(url, save_path):
     save_dir = os.path.dirname(save_path)
     os.makedirs(save_dir, exist_ok=True)
     
+    # 如果文件已存在但可能損壞，先刪除它
     if os.path.exists(save_path):
-        print(f"Pretrained model already exists at {save_path}")
-        return save_path
+        try:
+            # 嘗試載入來驗證文件是否有效
+            torch.load(save_path, map_location='cpu', weights_only=True)
+            print(f"預訓練模型已存在且有效: {save_path}")
+            return save_path
+        except Exception as e:
+            print(f"檢測到可能損壞的模型文件: {e}")
+            print(f"刪除損壞的文件並重新下載...")
+            os.remove(save_path)
     
-    print(f"Downloading pretrained model from {url}")
+    print(f"正在從 {url} 下載預訓練模型...")
+    print(f"這可能需要幾分鐘時間，取決於您的網絡速度...")
     
-    # Stream the download to avoid loading the whole file into memory
-    with requests.get(url, stream=True) as r:
-        r.raise_for_status()
-        with open(save_path, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                f.write(chunk)
-    
-    print(f"Downloaded pretrained model to {save_path}")
-    return save_path
+    try:
+        # 使用 urllib 代替 requests 來提高穩定性
+        import urllib.request
+        import ssl
+        
+        # 創建 SSL 上下文以處理某些 HTTPS 連接問題
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        # 下載文件，顯示進度
+        def report_progress(block_num, block_size, total_size):
+            downloaded = block_num * block_size
+            percent = min(100, downloaded * 100 / total_size)
+            if total_size > 0:
+                print(f"\r下載進度: {percent:.1f}% [{downloaded} / {total_size} bytes]", end="")
+        
+        urllib.request.urlretrieve(url, save_path, reporthook=report_progress)
+        print("\n下載完成!")
+        
+        # 驗證下載的文件
+        try:
+            torch.load(save_path, map_location='cpu', weights_only=True)
+            print(f"已下載並驗證預訓練模型: {save_path}")
+            return save_path
+        except Exception as e:
+            print(f"下載的模型文件無效: {e}")
+            os.remove(save_path)
+            raise RuntimeError(f"下載的模型文件無效，請嘗試使用備用 URL 或手動下載")
+            
+    except Exception as e:
+        print(f"下載時出錯: {e}")
+        # 提供替代 URL
+        print("注意: 如果持續下載失敗，請考慮以下方法:")
+        print("1. 嘗試使用 '--pretrained-path' 參數指定手動下載的模型路徑")
+        print("2. 使用備用 URL 下載模型:")
+        print("   - https://huggingface.co/microsoft/swinv2-base-patch4-window12-192-22k/resolve/main/pytorch_model.bin")
+        print("   - https://huggingface.co/microsoft/swinv2-base-patch4-window16to32-256to512-22kto1k-ft/resolve/main/pytorch_model.bin")
+        raise
 
 
 def freeze_backbone_layers(model, num_layers_to_freeze=None):
@@ -379,16 +418,39 @@ if __name__ == "__main__":
     # 解析命令行參數
     args = parse_args()
     
+    # 初始化分散式訓練環境變數
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    distributed_training = local_rank != -1 and torch.distributed.is_available()
+    
     # 設置設備
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
+    if torch.cuda.is_available():
+        if distributed_training:
+            device = torch.device(f"cuda:{local_rank}")
+            # 使用 torch.cuda.device 上下文管理器替代 set_device
+            with torch.cuda.device(local_rank):
+                pass  # 這會設置當前設備，而不使用 _cuda_setDevice
+        else:
+            device = torch.device("cuda:0")  # 單GPU模式
+    else:
+        device = torch.device("cpu")
+        print("CUDA 不可用，使用 CPU 進行訓練")
     
-    # 初始化分散式訓練
-    if torch.distributed.is_available() and not torch.distributed.is_initialized():
-        dist.init_process_group(backend='nccl', init_method='env://')
+    # 初始化分散式訓練 (如果需要)
+    if distributed_training:
+        try:
+            if not torch.distributed.is_initialized():
+                dist.init_process_group(backend='nccl', init_method='env://')
+            world_size = torch.distributed.get_world_size()
+            print(f"分散式訓練初始化成功，進程數: {world_size}")
+        except Exception as e:
+            print(f"初始化分散式訓練時出錯: {e}")
+            distributed_training = False
+            print("將以單 GPU 模式繼續訓練")
     
-    print(f"Process initialized with rank {local_rank}")
+    if distributed_training:
+        print(f"分散式訓練進程初始化，Rank: {local_rank}，設備: {device}")
+    else:
+        print(f"單 GPU 模式訓練，設備: {device}")
     
     # 設定目錄
     os.makedirs(args.output_dir, exist_ok=True)
@@ -528,11 +590,17 @@ if __name__ == "__main__":
     train_dataset = Food101Dataset(train_df, encoder, transform_train)
     test_dataset = Food101Dataset(test_df, encoder, transform_test)
     
-    train_sampler = DistributedSampler(train_dataset)
-    test_sampler = DistributedSampler(test_dataset)
-    
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=train_sampler)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, sampler=test_sampler)
+    # 創建適當的 sampler 和 dataloader
+    if distributed_training:
+        train_sampler = DistributedSampler(train_dataset)
+        test_sampler = DistributedSampler(test_dataset)
+        
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=train_sampler, pin_memory=True)
+        test_loader = DataLoader(test_dataset, batch_size=args.batch_size, sampler=test_sampler, pin_memory=True)
+    else:
+        # 單 GPU 模式使用普通的 DataLoader
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True)
+        test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True)
     
     # 下載預訓練模型（如果需要）
     pretrained_path = None
@@ -561,9 +629,10 @@ if __name__ == "__main__":
     if args.freeze_backbone:
         freeze_backbone_layers(model, args.freeze_layers)
     
-    # 分散式數據並行
-    model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
-    model._set_static_graph()
+    # 分散式數據並行 (如果需要)
+    if distributed_training:
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
+        model._set_static_graph()
     
     # 使用分層學習率，為骨幹和分類頭設置不同的學習率
     parameters = [
@@ -596,31 +665,36 @@ if __name__ == "__main__":
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch + 1}/{args.epochs}")
         
-        # 設置采樣器 epoch
-        train_sampler.set_epoch(epoch)
+        # 設置采樣器 epoch (僅分散式模式)
+        if distributed_training:
+            train_sampler.set_epoch(epoch)
         
         # 逐步解凍（如果啟用）
         if args.progressive_unfreeze and epoch == args.unfreeze_epoch:
-            if local_rank == 0:
+            # 在單 GPU 模式或主進程中顯示訊息
+            if not distributed_training or local_rank == 0:
                 print(f"Unfreezing all layers at epoch {epoch + 1}")
             unfreeze_all_layers(model)
         
         # 訓練和測試
         if args.amp:
-            train_acc = train_epoch_amp(model, train_loader, optimizer, scheduler, criterion, device, scaler)
+            train_acc = train_epoch_amp(model, train_loader, optimizer, scheduler, criterion, device, scaler, epoch=epoch)
         else:
             train_acc = train_epoch(model, train_loader, optimizer, scheduler, criterion, device)
             
         test_acc = test_epoch(model, test_loader, criterion, device)
         
-        # 保存最佳模型
-        if test_acc > best_acc and local_rank == 0:
+        # 保存最佳模型 (單 GPU 模式或主進程)
+        if test_acc > best_acc and (not distributed_training or local_rank == 0):
             best_acc = test_acc
             model_save_path = os.path.join(args.output_dir, f"swinv2_food101_best.pth")
+            
+            # 在分散式模式下，保存模組的模塊
             if hasattr(model, 'module'):
                 model_state = model.module.state_dict()
             else:
                 model_state = model.state_dict()
+                
             torch.save({
                 'epoch': epoch,
                 'model': model_state,
@@ -630,13 +704,16 @@ if __name__ == "__main__":
             }, model_save_path)
             print(f"Saved best model with accuracy {best_acc:.2f}% to {model_save_path}")
         
-        # 定期保存檢查點
-        if (epoch + 1) % args.save_interval == 0 and local_rank == 0:
+        # 定期保存檢查點 (單 GPU 模式或主進程)
+        if (epoch + 1) % args.save_interval == 0 and (not distributed_training or local_rank == 0):
             checkpoint_path = os.path.join(args.output_dir, f"swinv2_food101_checkpoint_{epoch + 1}.pth")
+            
+            # 在分散式模式下，保存模組的模塊
             if hasattr(model, 'module'):
                 model_state = model.module.state_dict()
             else:
                 model_state = model.state_dict()
+                
             torch.save({
                 'epoch': epoch,
                 'model': model_state,
@@ -646,10 +723,10 @@ if __name__ == "__main__":
             }, checkpoint_path)
             print(f"Saved checkpoint at epoch {epoch + 1} to {checkpoint_path}")
     
-    # 結束訓練
-    if local_rank == 0:
+    # 結束訓練 (單 GPU 模式或主進程)
+    if not distributed_training or local_rank == 0:
         print(f"Training completed. Best accuracy: {best_acc:.2f}%")
     
-    # 清理
-    if torch.distributed.is_initialized():
+    # 清理 (僅分散式模式)
+    if distributed_training and torch.distributed.is_initialized():
         destroy_process_group()

@@ -23,3 +23,9 @@ Thumbs.db
 # Ignore IDE project files
 .idea/
 .vscode/
+
+# Ignore data and model files
+food-101.zip
+archive(4).zip
+outputs/
+food-101_ZIP/
