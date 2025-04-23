@@ -459,18 +459,23 @@ def evaluate_clustering(model, dataloader, device, n_clusters=10):
 
 # Main Program
 if __name__ == "__main__":
-    # NOTE: The process group is initialized by torchrun automatically
-    # DO NOT initialize it again with torch.distributed.init_process_group()
+    # 檢查是否在分散式環境中運行
+    is_distributed = "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1
     
     try:
-        # Get the local rank from environment variable
-        local_rank = int(os.environ["LOCAL_RANK"])
-        torch.cuda.set_device(local_rank)
-        device = torch.device(f"cuda:{local_rank}")
-        
-        dist.init_process_group(backend='nccl', init_method='env://')
-
-        print(f"Process initialized with rank {local_rank}")
+        if is_distributed:
+            # 在分散式環境中運行
+            local_rank = int(os.environ["LOCAL_RANK"])
+            torch.cuda.set_device(local_rank)
+            device = torch.device(f"cuda:{local_rank}")
+            
+            dist.init_process_group(backend='nccl', init_method='env://')
+            print(f"Process initialized with rank {local_rank}")
+        else:
+            # 在單設備環境中運行
+            local_rank = 0
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            print(f"Running on device: {device}")
 
         BATCH_SIZE = 64  # 從原本的32增加到64
         IMAGE_SIZE = 224
@@ -610,11 +615,16 @@ if __name__ == "__main__":
         # 更新測試資料集使用適合測試的轉換
         test_dataset = Food101Dataset(test_df, encoder, transform_test)
 
-        train_sampler = DistributedSampler(train_dataset)
-        test_sampler = DistributedSampler(test_dataset)
-
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler)
-        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, sampler=test_sampler)
+        if is_distributed:
+            train_sampler = DistributedSampler(train_dataset)
+            test_sampler = DistributedSampler(test_dataset)
+            train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler)
+            test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, sampler=test_sampler)
+        else:
+            train_sampler = None
+            test_sampler = None
+            train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+            test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
         num_epochs = 110
 
@@ -627,8 +637,10 @@ if __name__ == "__main__":
         )
         
         model = model.to(device)
-        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
-        model._set_static_graph()  
+        
+        if is_distributed:
+            model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
+            model._set_static_graph()  
 
         # 使用分層學習率，為骨幹和分類頭設置不同的學習率
         parameters = [
@@ -659,13 +671,16 @@ if __name__ == "__main__":
         best_acc = 0
         for epoch in range(num_epochs):
             print(f"\nEpoch {epoch + 1}/{num_epochs}")
-            train_sampler.set_epoch(epoch)
+            
+            if is_distributed:
+                train_sampler.set_epoch(epoch)
+                
             train_acc = train_epoch_amp(model, train_loader, optimizer, scheduler, criterion, device, scaler)
             test_acc = test_epoch(model, test_loader, criterion, device)
 
             if test_acc > best_acc:
                 best_acc = test_acc
-                if local_rank == 0:
+                if local_rank == 0 or not is_distributed:
                     torch.save(model.state_dict(), 'swin_v2_model_test.pth')
     
     except Exception as e:
@@ -674,20 +689,29 @@ if __name__ == "__main__":
         print(traceback.format_exc())
     finally:
         # Cleanup
-        if torch.distributed.is_initialized():
+        if is_distributed and torch.distributed.is_initialized():
             destroy_process_group()
 
     try:
-        # Get the local rank from environment variable
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        torch.cuda.set_device(local_rank)
-        device = torch.device(f"cuda:{local_rank}")
+        # 檢查是否在分散式環境中運行
+        is_distributed = "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1
         
-        # Initialize distributed process group if not already done
-        if not torch.distributed.is_initialized():
-            dist.init_process_group(backend='nccl', init_method='env://')
-
-        print(f"Process initialized with rank {local_rank}")
+        if is_distributed:
+            # 在分散式環境中運行
+            local_rank = int(os.environ.get("LOCAL_RANK", 0))
+            torch.cuda.set_device(local_rank)
+            device = torch.device(f"cuda:{local_rank}")
+            
+            # Initialize distributed process group if not already done
+            if not torch.distributed.is_initialized():
+                dist.init_process_group(backend='nccl', init_method='env://')
+                
+            print(f"Process initialized with rank {local_rank}")
+        else:
+            # 在單設備環境中運行
+            local_rank = 0
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            print(f"Running SimCLR training on device: {device}")
 
         # Parameters
         BATCH_SIZE = 64
@@ -725,26 +749,42 @@ if __name__ == "__main__":
             transform=eval_transform
         )
 
-        # Create samplers for distributed training
-        train_sampler = DistributedSampler(train_dataset)
-        eval_sampler = DistributedSampler(eval_dataset, shuffle=False)
-
-        # Create dataloaders
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_size=BATCH_SIZE, 
-            sampler=train_sampler,
-            num_workers=4,
-            pin_memory=True
-        )
-        
-        eval_loader = DataLoader(
-            eval_dataset,
-            batch_size=BATCH_SIZE,
-            sampler=eval_sampler,
-            num_workers=4,
-            pin_memory=True
-        )
+        # Create data loaders with appropriate sampler
+        if is_distributed:
+            train_sampler = DistributedSampler(train_dataset)
+            eval_sampler = DistributedSampler(eval_dataset, shuffle=False)
+            
+            train_loader = DataLoader(
+                train_dataset, 
+                batch_size=BATCH_SIZE, 
+                sampler=train_sampler,
+                num_workers=4,
+                pin_memory=True
+            )
+            
+            eval_loader = DataLoader(
+                eval_dataset,
+                batch_size=BATCH_SIZE,
+                sampler=eval_sampler,
+                num_workers=4,
+                pin_memory=True
+            )
+        else:
+            train_loader = DataLoader(
+                train_dataset, 
+                batch_size=BATCH_SIZE, 
+                shuffle=True,
+                num_workers=4,
+                pin_memory=True
+            )
+            
+            eval_loader = DataLoader(
+                eval_dataset,
+                batch_size=BATCH_SIZE,
+                shuffle=False,
+                num_workers=4,
+                pin_memory=True
+            )
 
         # Number of epochs
         num_epochs = 100
@@ -758,12 +798,14 @@ if __name__ == "__main__":
         )
         
         model = model.to(device)
-        model = nn.parallel.DistributedDataParallel(
-            model, 
-            device_ids=[local_rank], 
-            find_unused_parameters=True
-        )
-        model._set_static_graph()  
+        
+        if is_distributed:
+            model = nn.parallel.DistributedDataParallel(
+                model, 
+                device_ids=[local_rank], 
+                find_unused_parameters=True
+            )
+            model._set_static_graph()  
 
         # Initialize NT-Xent loss
         criterion = NT_Xent(batch_size=BATCH_SIZE, temperature=0.07)
@@ -792,7 +834,8 @@ if __name__ == "__main__":
             print(f"\nEpoch {epoch + 1}/{num_epochs}")
             
             # Set epoch for distributed sampler
-            train_sampler.set_epoch(epoch)
+            if is_distributed:
+                train_sampler.set_epoch(epoch)
             
             # Train for one epoch
             train_loss = train_epoch_simclr(model, train_loader, optimizer, criterion, device, scaler)
@@ -801,11 +844,12 @@ if __name__ == "__main__":
             scheduler.step(epoch)
             
             # Save model checkpoint (only on main process)
-            if local_rank == 0 and (epoch + 1) % 10 == 0:
+            if (local_rank == 0 or not is_distributed) and (epoch + 1) % 10 == 0:
+                model_to_save = model.module if is_distributed else model
                 torch.save(
                     {
                         'epoch': epoch,
-                        'model_state_dict': model.module.state_dict(),
+                        'model_state_dict': model_to_save.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
                     }, 
                     f'swin_v2_simclr_epoch_{epoch+1}.pth'
@@ -813,19 +857,21 @@ if __name__ == "__main__":
             
             # Evaluate with clustering (every 10 epochs)
             if (epoch + 1) % 10 == 0:
-                evaluate_clustering(model.module, eval_loader, device)
+                model_to_eval = model.module if is_distributed else model
+                evaluate_clustering(model_to_eval, eval_loader, device)
                 
         # Final evaluation with different cluster counts
-        if local_rank == 0:
+        if local_rank == 0 or not is_distributed:
             print("\nFinal Evaluation with Different Cluster Counts")
+            model_to_eval = model.module if is_distributed else model
             for n_clusters in [5, 10, 15, 20]:
-                evaluate_clustering(model.module, eval_loader, device, n_clusters=n_clusters)
+                evaluate_clustering(model_to_eval, eval_loader, device, n_clusters=n_clusters)
                 
             # Save final model
             torch.save(
                 {
                     'epoch': num_epochs,
-                    'model_state_dict': model.module.state_dict(),
+                    'model_state_dict': model_to_eval.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                 }, 
                 'swin_v2_simclr_final.pth'
@@ -837,5 +883,5 @@ if __name__ == "__main__":
         print(traceback.format_exc())
     finally:
         # Cleanup
-        if torch.distributed.is_initialized():
+        if is_distributed and torch.distributed.is_initialized():
             destroy_process_group()
