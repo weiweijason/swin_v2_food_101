@@ -276,8 +276,12 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
         scaler.scale(loss).backward()
         
         # 在更新前應用梯度裁剪 - 使用更嚴格的閾值
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 將閾值從5.0降至1.0
+        try:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 將閾值從5.0降至1.0
+        except RuntimeError as e:
+            logger.warning(f"RuntimeError during unscale_: {e}. Skipping this batch.")
+            continue
         
         # 檢查梯度是否包含 NaN
         valid_gradients = True
