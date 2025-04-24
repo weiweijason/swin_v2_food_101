@@ -200,7 +200,7 @@ def visualize_cam(image, cam):
     return overlay
 
 
-def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, scaler):
+def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, scaler, epoch=None):
     """
     使用混合精度訓練的訓練函數，可加速訓練並降低記憶體使用量
     """
@@ -237,8 +237,8 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
     accuracy = 100. * correct / total
     print(f"Train Loss: {total_loss / len(dataloader):.3f} | Train Accuracy: {accuracy:.2f}%")
     
-    # 更新調度器 - 不傳入任何參數給 scheduler.step()
-    scheduler.step()
+    # 更新調度器 - 傳入 epoch 參數給 scheduler.step()
+    scheduler.step(epoch)
     
     return accuracy
 
@@ -675,7 +675,7 @@ if __name__ == "__main__":
             if is_distributed:
                 train_sampler.set_epoch(epoch)
                 
-            train_acc = train_epoch_amp(model, train_loader, optimizer, scheduler, criterion, device, scaler)
+            train_acc = train_epoch_amp(model, train_loader, optimizer, scheduler, criterion, device, scaler, epoch)
             test_acc = test_epoch(model, test_loader, criterion, device)
 
             if test_acc > best_acc:
@@ -716,7 +716,8 @@ if __name__ == "__main__":
         # Parameters
         BATCH_SIZE = 64
         IMAGE_SIZE = 224
-        IMAGE_ROOT = "social_event_dataset"  # Folder containing Social Event images
+        # 修改路徑使用現有的 Food-101 數據集而非不存在的 social_event_dataset
+        IMAGE_ROOT = "image"  # 使用 Food-101 數據集的路徑
         PROJECTION_DIM = 128
         
         # Define transformations for contrastive learning
