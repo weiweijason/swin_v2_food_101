@@ -249,11 +249,13 @@ def visualize_cam(image, cam):
 def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, scaler, epoch, logger):
     """
     使用混合精度訓練的訓練函數，可加速訓練並降低記憶體使用量
+    增加 NaN 檢測和處理
     """
     model.train()
     total_loss = 0
     correct = 0
     total = 0
+    nan_detected = False
 
     for inputs, targets in tqdm(dataloader, desc="Training"):
         inputs, targets = inputs.to(device), targets.to(device)
@@ -264,24 +266,48 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
             outputs = model(inputs)
             loss = criterion(outputs, targets)
         
+        # 檢查 loss 是否為 NaN
+        if torch.isnan(loss).any() or torch.isinf(loss).any():
+            logger.warning(f"NaN/Inf detected in loss at epoch {epoch}! Skipping this batch.")
+            nan_detected = True
+            continue
+        
         # 使用GradScaler處理反向傳播
         scaler.scale(loss).backward()
         
-        # 在更新前應用梯度裁剪
+        # 在更新前應用梯度裁剪 - 使用更嚴格的閾值
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 將閾值從5.0降至1.0
         
-        # 更新參數
-        scaler.step(optimizer)
-        scaler.update()
+        # 檢查梯度是否包含 NaN
+        valid_gradients = True
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                    logger.warning(f"NaN/Inf detected in gradients for {name} at epoch {epoch}!")
+                    valid_gradients = False
+                    break
+        
+        # 只有在梯度有效時才更新參數
+        if valid_gradients:
+            # 更新參數
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            nan_detected = True
+            continue
 
         total_loss += loss.item()
         _, predicted = outputs.max(1)
         total += targets.size(0)
         correct += predicted.eq(targets).sum().item()
 
+    # 如果整個 epoch 中檢測到 NaN，則發出警告
+    if nan_detected:
+        logger.warning(f"NaN values detected during training in epoch {epoch}. Consider adjusting learning rate or gradient clipping.")
+
     accuracy = 100. * correct / total
-    avg_loss = total_loss / len(dataloader)
+    avg_loss = total_loss / len(dataloader) if len(dataloader) > 0 else float('nan')
     logger.info(f"Train Loss: {avg_loss:.3f} | Train Accuracy: {accuracy:.2f}%")
     
     # 更新調度器 - 傳入epoch參數
@@ -468,13 +494,13 @@ if __name__ == "__main__":
 
         # 使用分層學習率，為骨幹和分類頭設置不同的學習率
         parameters = [
-            {'params': [p for n, p in model.named_parameters() if 'backbone' in n], 'lr': 1e-5},  # 骨幹網路較低學習率
-            {'params': [p for n, p in model.named_parameters() if 'head' in n], 'lr': 5e-5}  # 分類頭較高學習率
+            {'params': [p for n, p in model.named_parameters() if 'backbone' in n], 'lr': 5e-6},  # 降低骨幹網路學習率
+            {'params': [p for n, p in model.named_parameters() if 'head' in n], 'lr': 1e-5}  # 降低分類頭學習率
         ]
         
         optimizer = optim.AdamW(
             parameters,
-            weight_decay=0.05  # 較高的權重衰減以提供更好的正則化
+            weight_decay=0.01  # 降低權重衰減值，防止數值不穩定
         )
         
         # 加入標籤平滑提高泛化能力
