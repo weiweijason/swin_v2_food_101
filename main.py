@@ -28,7 +28,7 @@ from swin_transformer_v2_classifier import swin_transformer_v2_base_classifier
 # 設置日誌格式
 def setup_logger(local_rank):
     # 創建日誌格式
-    log_format = '%(asctime)s - %(levelname)s - Rank[%(rank)s] - %(message)s'
+    log_format = '%(asctime)s - %(levellevelname)s - Rank[%(rank)s] - %(message)s'
     date_format = '%Y-%m-%d %H:%M:%S'
     
     # 創建一個自定義的過濾器，添加rank信息
@@ -256,6 +256,7 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
     correct = 0
     total = 0
     nan_detected = False
+    batch_processed = 0  # 追蹤成功處理的批次數量
 
     for inputs, targets in tqdm(dataloader, desc="Training"):
         inputs, targets = inputs.to(device), targets.to(device)
@@ -277,6 +278,11 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
         
         # 在更新前應用梯度裁剪 - 使用更嚴格的閾值
         try:
+            # 檢查梯度是否已被 unscaled，避免重複調用
+            if any(p.grad is not None and torch.isnan(p.grad).any() for p in model.parameters() if p.requires_grad):
+                logger.warning(f"NaN detected in gradients before unscaling at epoch {epoch}!")
+                continue
+                
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 將閾值從5.0降至1.0
         except RuntimeError as e:
@@ -297,22 +303,31 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
             # 更新參數
             scaler.step(optimizer)
             scaler.update()
+            
+            # 只計算成功更新的批次
+            total_loss += loss.item()
+            _, predicted = outputs.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
+            batch_processed += 1
         else:
             nan_detected = True
             continue
-
-        total_loss += loss.item()
-        _, predicted = outputs.max(1)
-        total += targets.size(0)
-        correct += predicted.eq(targets).sum().item()
 
     # 如果整個 epoch 中檢測到 NaN，則發出警告
     if nan_detected:
         logger.warning(f"NaN values detected during training in epoch {epoch}. Consider adjusting learning rate or gradient clipping.")
 
-    accuracy = 100. * correct / total
-    avg_loss = total_loss / len(dataloader) if len(dataloader) > 0 else float('nan')
-    logger.info(f"Train Loss: {avg_loss:.3f} | Train Accuracy: {accuracy:.2f}%")
+    # 防止除以零錯誤
+    if total == 0:
+        logger.error(f"All batches were skipped in epoch {epoch}! Training cannot proceed.")
+        accuracy = 0.0
+        avg_loss = float('nan')
+    else:
+        accuracy = 100. * correct / total
+        avg_loss = total_loss / batch_processed if batch_processed > 0 else float('nan')
+        
+    logger.info(f"Train Loss: {avg_loss:.3f} | Train Accuracy: {accuracy:.2f}% | Batches processed: {batch_processed}/{len(dataloader)}")
     
     # 更新調度器 - 傳入epoch參數
     scheduler.step(epoch)
