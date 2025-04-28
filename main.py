@@ -497,7 +497,7 @@ if __name__ == "__main__":
         train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler)
         test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, sampler=test_sampler)
 
-        num_epochs = 110
+        num_epochs = 20
 
         # Initialize the SwinV2 model
         model = swin_transformer_v2_base_classifier(
