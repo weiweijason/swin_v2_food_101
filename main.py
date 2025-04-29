@@ -546,7 +546,7 @@ if __name__ == "__main__":
             train_dataset, 
             batch_size=BATCH_SIZE, 
             sampler=train_sampler, 
-            num_workers=8,  # 增加從4到8
+            num_workers=64,  # 增加從4到8
             pin_memory=True, 
             drop_last=True,
             prefetch_factor=2,  # 預取因子設為2
