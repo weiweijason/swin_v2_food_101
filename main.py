@@ -134,7 +134,7 @@ def prepare_dataframe(file_path, image_root, encoder):
     return shuffle(df)
 
 
-# Training Function with Mixup and Cutmix
+# 訓練 Function with Mixup and Cutmix
 def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, scaler, epoch, logger, mixup_fn=None, gradient_accumulation_steps=4):
     """
     使用混合精度訓練的訓練函數，可加速訓練並降低記憶體使用量
@@ -180,10 +180,10 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
             consecutive_nan_count += 1
             
             # 連續出現多個NaN時降低學習率
-            if consecutive_nan_count >= 5:
+            if consecutive_nan_count >= 3:  # 降低連續NaN的閾值
                 for param_group in optimizer.param_groups:
-                    param_group['lr'] = param_group['lr'] * 0.8  # 降低學習率到原來的80%
-                logger.warning(f"Reducing learning rate due to consecutive NaNs at epoch {epoch}")
+                    param_group['lr'] = param_group['lr'] * 0.5  # 顯著降低學習率到原來的50%
+                logger.warning(f"Reducing learning rate to {optimizer.param_groups[0]['lr']} due to consecutive NaNs")
                 consecutive_nan_count = 0  # 重置計數器
                 
             continue
@@ -200,61 +200,46 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
         # 當達到指定的累積步數或是最後一個批次時，更新參數
         is_last_batch = (i == len(dataloader) - 1)
         if accumulation_counter == gradient_accumulation_steps or is_last_batch:
-            # 在更新前應用梯度裁剪
+            # 在更新前應用梯度裁剪 - 使用更小的閾值
             try:
-                # 檢查梯度是否已被 unscaled，避免重複調用
-                if any(p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()) for p in model.parameters() if p.requires_grad):
-                    logger.warning(f"NaN/Inf detected in gradients before unscaling at epoch {epoch}, batch {i}!")
-                    optimizer.zero_grad(set_to_none=True)
-                    accumulation_counter = 0
-                    continue
-                    
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                # 使用更小的梯度裁剪閾值，可以提高穩定性
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             except RuntimeError as e:
                 logger.warning(f"RuntimeError during unscale_: {e}. Skipping this batch.")
                 optimizer.zero_grad(set_to_none=True)
                 accumulation_counter = 0
                 continue
             
-            # 檢查梯度是否包含 NaN
-            valid_gradients = True
-            for name, param in model.named_parameters():
-                if param.grad is not None:
-                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                        logger.warning(f"NaN/Inf detected in gradients for {name} at epoch {epoch}, batch {i}!")
-                        valid_gradients = False
-                        break
+            # 更新參數
+            scaler.step(optimizer)
+            scaler.update()
             
-            # 只有在梯度有效時才更新參數
-            if valid_gradients:
-                # 更新參數
-                scaler.step(optimizer)
-                scaler.update()
-                
-                # 只計算成功更新的批次
-                total_loss += loss.item() * gradient_accumulation_steps  # 乘以累積步數恢復原始loss
-                
-                # 計算準確率
-                _, predicted = outputs.max(1)
-                
-                # 如果使用了 mixup，則計算近似準確率（與最大權重標籤比較）
-                if mixup_fn is not None:
-                    # 將 predicted 與原始標籤比較
-                    mixup_total += original_targets.size(0)
-                    mixup_correct += predicted.eq(original_targets).sum().item()
-                else:
-                    # 標準準確率計算
-                    total += targets.size(0)
-                    correct += predicted.eq(targets).sum().item()
-                
-                batch_processed += 1
+            # 只計算成功更新的批次
+            total_loss += loss.item() * gradient_accumulation_steps  # 乘以累積步數恢復原始loss
+            
+            # 計算準確率
+            _, predicted = outputs.max(1)
+            
+            # 如果使用了 mixup，則計算近似準確率（與最大權重標籤比較）
+            if mixup_fn is not None:
+                # 將 predicted 與原始標籤比較
+                mixup_total += original_targets.size(0)
+                mixup_correct += predicted.eq(original_targets).sum().item()
             else:
-                nan_detected = True
-                
+                # 標準準確率計算
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+            
+            batch_processed += 1
+            
             # 重置優化器梯度和累積計數器
             optimizer.zero_grad(set_to_none=True)
             accumulation_counter = 0
+            
+            # 每隔一段時間釋放未使用的記憶體
+            if i % 50 == 0:
+                torch.cuda.empty_cache()
 
     # 如果整個 epoch 中檢測到 NaN，則發出警告
     if nan_detected:
@@ -420,10 +405,10 @@ if __name__ == "__main__":
         logger = setup_logger(local_rank)
 
         # 更新參數設置
-        BATCH_SIZE = 64  # 從64增加到1024
-        IMAGE_SIZE = 224   # 從224增加到256
-        WINDOW_SIZE = 7    # 從7增加到8
-        NUM_EPOCHS = 30    # 從20增加到30
+        BATCH_SIZE = 32  # 從64減小到32，減少記憶體需求
+        IMAGE_SIZE = 192  # 從224減小到192，減少記憶體需求
+        WINDOW_SIZE = 7    
+        NUM_EPOCHS = 30    
         IMAGE_ROOT = "food-101/images"
         TRAIN_FILE = "food-101/meta/train.txt"
         TEST_FILE = "food-101/meta/test.txt"
@@ -604,9 +589,8 @@ if __name__ == "__main__":
             input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
             window_size=WINDOW_SIZE,
             num_classes=len(LABELS),
-            use_checkpoint=True,
-            # 添加 stochastic depth (dropout_path)
-            dropout_path=0.3  # 設置 stochastic depth 率為 0.3
+            use_checkpoint=True,  # 保留 checkpoint 功能以節省顯存
+            dropout_path=0.1  # 降低 stochastic depth 率，減少計算負擔
         )
         
         model = model.to(device)
@@ -614,9 +598,13 @@ if __name__ == "__main__":
         # 跳過載入預訓練權重，從頭開始訓練
         logger.info("從頭開始訓練模型，不使用預訓練權重")
         
-        # 先將模型包裝在 DDP 中
-        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
-        model._set_static_graph()
+        # 使用 DDP 包裝模型，但不使用 find_unused_parameters，這可能導致通信問題
+        model = nn.parallel.DistributedDataParallel(
+            model, 
+            device_ids=[local_rank],
+            find_unused_parameters=False,  # 關閉該選項，減少通信開銷
+            timeout=1800  # 增加超時時間到30分鐘，防止長時間操作導致超時
+        )
         
         # 禁用 torch.compile 與 DDP 的優化以避免衝突
         if hasattr(torch, '_dynamo'):
