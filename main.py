@@ -32,7 +32,7 @@ from swin_transformer_v2_classifier import swin_transformer_v2_base_classifier
 # 設置日誌格式
 def setup_logger(local_rank):
     # 創建日誌格式
-    log_format = '%(asctime)s - %(levelname)s - Rank[%(rank)s] - %(message)s'
+    log_format = '%(asctime)s - %(level)s - Rank[%(rank)s] - %(message)s'
     date_format = '%Y-%m-%d %H:%M:%S'
     
     # 創建一個自定義的過濾器，添加rank信息
@@ -134,6 +134,11 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
     total_loss = 0
     correct = 0
     total = 0
+    
+    # 追蹤 Mixup 準確率的變數
+    mixup_correct = 0
+    mixup_total = 0
+    
     nan_detected = False
     batch_processed = 0  # 追蹤成功處理的批次數量
     consecutive_nan_count = 0  # 計算連續出現NaN的次數
@@ -147,8 +152,9 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
     for i, (inputs, targets) in enumerate(tqdm(dataloader, desc="Training")):
         inputs, targets = inputs.to(device), targets.to(device)
         
-        # 應用 Mixup/Cutmix 如果存在
+        # 記錄原始標籤以計算近似準確率
         if mixup_fn is not None:
+            original_targets = targets.clone()  # 在應用 mixup 前保存原始標籤
             inputs, targets = mixup_fn(inputs, targets)
         
         # 使用混合精度前向傳播
@@ -219,9 +225,16 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
                 # 只計算成功更新的批次
                 total_loss += loss.item() * gradient_accumulation_steps  # 乘以累積步數恢復原始loss
                 
-                # 如果使用了 mixup，則不計算準確率（因為標籤是軟標籤）
-                if mixup_fn is None:
-                    _, predicted = outputs.max(1)
+                # 計算準確率
+                _, predicted = outputs.max(1)
+                
+                # 如果使用了 mixup，則計算近似準確率（與最大權重標籤比較）
+                if mixup_fn is not None:
+                    # 將 predicted 與原始標籤比較
+                    mixup_total += original_targets.size(0)
+                    mixup_correct += predicted.eq(original_targets).sum().item()
+                else:
+                    # 標準準確率計算
                     total += targets.size(0)
                     correct += predicted.eq(targets).sum().item()
                 
@@ -245,22 +258,23 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
     else:
         avg_loss = total_loss / batch_processed
         
-        # 只有在沒有使用 mixup 時才計算準確率
+        # 計算標準準確率或近似準確率
         if mixup_fn is None and total > 0:
             accuracy = 100. * correct / total
+        elif mixup_total > 0:  # 使用 mixup 時的近似準確率
+            accuracy = 100. * mixup_correct / mixup_total
         else:
-            accuracy = float('nan')  # 不計算 mixup 下的準確率
+            accuracy = float('nan')
         
     # 報告當前學習率
     current_lr = [group['lr'] for group in optimizer.param_groups]
     
-    # 修正格式化問題：先判斷是否有準確率，然後再進行格式化
-    if np.isnan(accuracy):
-        accuracy_str = "N/A (using mixup)"
-    else:
-        accuracy_str = f"{accuracy:.2f}%"
+    # 準備日誌消息
+    accuracy_msg = f"{accuracy:.2f}%" if not np.isnan(accuracy) else "N/A (using mixup)"
+    if mixup_fn is not None and not np.isnan(accuracy):
+        accuracy_msg = f"{accuracy:.2f}% (近似值)"
     
-    logger.info(f"Train Loss: {avg_loss:.3f} | Train Accuracy: {accuracy_str} | Batches processed: {batch_processed}/{len(dataloader)} | LR: {current_lr}")
+    logger.info(f"Train Loss: {avg_loss:.3f} | Train Accuracy: {accuracy_msg} | Batches processed: {batch_processed}/{len(dataloader)} | LR: {current_lr}")
     
     # 更新調度器
     scheduler.step(epoch)
@@ -270,24 +284,37 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
 
 # Testing Function
 def test_epoch(model, dataloader, criterion, device, logger):
+    """
+    記憶體優化版的測試函數，分批處理測試資料並確保正確釋放記憶體
+    """
     model.eval()
     total_loss = 0
     correct = 0
     total = 0
-
+    
+    # 使用較小的批次進行處理，減少記憶體使用
+    # 確保使用torch.no_grad()上下文，避免保存不必要的梯度信息
     with torch.no_grad():
         for inputs, targets in tqdm(dataloader, desc="Testing"):
             inputs, targets = inputs.to(device), targets.to(device)
+            
+            # 使用純淨的推理模式
             outputs = model(inputs)
             
-            # 使用標準交叉熵損失進行測試評估（無論訓練中是否使用 mixup/cutmix）
-            loss = nn.CrossEntropyLoss()(outputs, targets)
-
+            # 計算損失
+            loss = criterion(outputs, targets)
+            
+            # 累積損失和正確預測數
             total_loss += loss.item()
             _, predicted = outputs.max(1)
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
-
+            
+            # 主動清除不需要的張量以釋放記憶體
+            del outputs, loss, predicted
+            torch.cuda.empty_cache()  # 顯式清空CUDA快取
+    
+    # 計算平均損失和準確率
     accuracy = 100. * correct / total
     avg_loss = total_loss / len(dataloader)
     logger.info(f"Test Loss: {avg_loss:.3f} | Test Accuracy: {accuracy:.2f}%")
@@ -541,25 +568,25 @@ if __name__ == "__main__":
         train_sampler = DistributedSampler(train_dataset)
         test_sampler = DistributedSampler(test_dataset)
 
-        # 更新數據加載器配置
+        # 更新數據加載器配置 - 充分利用128GB CPU記憶體，加速數據載入
         train_loader = DataLoader(
             train_dataset, 
             batch_size=BATCH_SIZE, 
             sampler=train_sampler, 
-            num_workers=64,  # 增加從4到8
+            num_workers=64,  # 從4增加到64，充分利用128GB CPU記憶體
             pin_memory=True, 
             drop_last=True,
-            prefetch_factor=2,  # 預取因子設為2
-            persistent_workers=True  # 持久化工作進程，避免重複創建和銷毀
+            prefetch_factor=4,  # 增加預取因子從2到4
+            persistent_workers=True
         )
         test_loader = DataLoader(
             test_dataset, 
-            batch_size=BATCH_SIZE * 2,  # 測試時可用更大批次，因為不存儲梯度
+            batch_size=BATCH_SIZE // 2,  # 保持測試批次大小較小，避免GPU記憶體不足
             sampler=test_sampler, 
-            num_workers=8,  # 增加從4到8
+            num_workers=64,  # 從4增加到64，充分利用CPU
             pin_memory=True,
-            prefetch_factor=2,  # 預取因子設為2
-            persistent_workers=True  # 持久化工作進程
+            prefetch_factor=4,  # 增加預取因子從2到4
+            persistent_workers=True
         )
 
         # 初始化 SwinV2 模型，使用新的參數
