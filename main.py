@@ -538,11 +538,11 @@ if __name__ == "__main__":
             transforms.RandomResizedCrop(IMAGE_SIZE),
             transforms.RandomHorizontalFlip(),
             transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.2),
-            RandAugment(num_ops=2, magnitude=9),  # 添加RandAugment增強
+            RandAugment(num_ops=2, magnitude=5),  # 降低 RandAugment 強度以提高穩定性
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                std=[0.229, 0.224, 0.225]),
-            RandomErasing(p=0.25, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0, inplace=False),  # 添加RandomErasing
+            RandomErasing(p=0.15, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0, inplace=False),  # 降低RandomErasing概率
         ])
 
         # 測試集轉換保持簡單
@@ -611,6 +611,9 @@ if __name__ == "__main__":
         
         model = model.to(device)
         
+        # 跳過載入預訓練權重，從頭開始訓練
+        logger.info("從頭開始訓練模型，不使用預訓練權重")
+        
         # 先將模型包裝在 DDP 中
         model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
         model._set_static_graph()
@@ -629,10 +632,10 @@ if __name__ == "__main__":
                 except Exception as e:
                     logger.warning(f"torch.compile() 失敗: {e}，跳過編譯")
 
-        # 使用 AdamW 優化器並設置初始學習率為 4e-5，權重衰減為 0.05
+        # 使用 AdamW 優化器並設置初始學習率為 1e-4，比原來的4e-5更高
         optimizer = optim.AdamW(
             model.parameters(),
-            lr=4e-5,
+            lr=1e-4,  # 提高初始學習率
             weight_decay=0.05
         )
         
@@ -644,7 +647,7 @@ if __name__ == "__main__":
             optimizer,
             t_initial=NUM_EPOCHS,
             lr_min=1e-6,
-            warmup_t=5,
+            warmup_t=10,  # 增加預熱期
             warmup_lr_init=1e-7,
             cycle_limit=1,
             t_in_epochs=True,

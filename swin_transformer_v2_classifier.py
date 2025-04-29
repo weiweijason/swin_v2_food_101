@@ -100,8 +100,11 @@ class SwinTransformerV2Classifier(nn.Module):
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
+            # 檢查 bias 和 weight 是否存在，避免 NoneType 錯誤
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+            if m.weight is not None:
+                nn.init.constant_(m.weight, 1.0)
     
     def update_resolution(self, new_window_size: int, new_input_resolution: Tuple[int, int]) -> None:
         """
