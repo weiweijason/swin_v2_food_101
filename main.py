@@ -574,16 +574,23 @@ if __name__ == "__main__":
         
         model = model.to(device)
         
-        # 使用 torch.compile() 加速模型 (僅支援 PyTorch 2.0+)
-        if hasattr(torch, 'compile') and torch.__version__ >= '2.0.0':
-            try:
-                logger.info("使用 torch.compile() 加速模型")
-                model = torch.compile(model, mode='reduce-overhead')
-            except Exception as e:
-                logger.warning(f"torch.compile() 失敗: {e}，跳過編譯")
-                
+        # 先將模型包裝在 DDP 中
         model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
-        model._set_static_graph()  
+        model._set_static_graph()
+        
+        # 禁用 torch.compile 與 DDP 的優化以避免衝突
+        if hasattr(torch, '_dynamo'):
+            torch._dynamo.config.optimize_ddp = False
+            # 允許在出錯時回退到 eager 模式
+            torch._dynamo.config.suppress_errors = True
+            
+            if hasattr(torch, 'compile') and torch.__version__ >= '2.0.0':
+                try:
+                    logger.info("使用 torch.compile() 加速模型，已禁用 optimize_ddp")
+                    # 模型已經是 DDP 包裝的，不能直接編譯，所以我們編譯內部模塊
+                    model.module = torch.compile(model.module, mode='reduce-overhead')
+                except Exception as e:
+                    logger.warning(f"torch.compile() 失敗: {e}，跳過編譯")
 
         # 使用 AdamW 優化器並設置初始學習率為 4e-5，權重衰減為 0.05
         optimizer = optim.AdamW(
