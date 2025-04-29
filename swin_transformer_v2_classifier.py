@@ -41,7 +41,7 @@ class SwinTransformerV2Classifier(nn.Module):
         :param ff_feature_ratio: (int) Feed-forward feature ratio
         :param dropout: (float) Dropout rate
         :param dropout_attention: (float) Attention dropout rate
-        :param dropout_path: (float) Path dropout rate
+        :param dropout_path: (float) Path dropout rate (Stochastic Depth)
         :param use_checkpoint: (bool) Use checkpointing
         :param sequential_self_attention: (bool) Use sequential self-attention
         :param use_deformable_block: (bool) Use deformable blocks
@@ -81,9 +81,8 @@ class SwinTransformerV2Classifier(nn.Module):
         self.apply(self._init_weights)
 
         # 使用更穩定的特徵縮放，避免NaN問題
-        in_features = self.backbone.num_features if hasattr(self.backbone, 'num_features') else self.head.in_features
         self.feature_scaling = nn.Sequential(
-            nn.LayerNorm(in_features, elementwise_affine=False),  # 使用LayerNorm替代BatchNorm1d提高穩定性
+            nn.LayerNorm(last_stage_channels, elementwise_affine=False),  # 使用LayerNorm替代BatchNorm1d提高穩定性
             nn.Dropout(0.1)  # 添加額外的dropout以防止過擬合
         )
     
@@ -153,7 +152,8 @@ def swin_transformer_v2_base_classifier(input_resolution: Tuple[int, int] = (224
                                        in_channels: int = 3,
                                        num_classes: int = 1000,
                                        use_checkpoint: bool = False,
-                                       sequential_self_attention: bool = False) -> SwinTransformerV2Classifier:
+                                       sequential_self_attention: bool = False,
+                                       dropout_path: float = 0.2) -> SwinTransformerV2Classifier:
     """
     Creates a Swin Transformer V2 Base model for classification
     :param input_resolution: (Tuple[int, int]) Input resolution
@@ -162,6 +162,7 @@ def swin_transformer_v2_base_classifier(input_resolution: Tuple[int, int] = (224
     :param num_classes: (int) Number of classes
     :param use_checkpoint: (bool) Use checkpointing
     :param sequential_self_attention: (bool) Use sequential self-attention
+    :param dropout_path: (float) Stochastic depth rate
     :return: (SwinTransformerV2Classifier) SwinV2 classifier
     """
     return SwinTransformerV2Classifier(
@@ -169,8 +170,9 @@ def swin_transformer_v2_base_classifier(input_resolution: Tuple[int, int] = (224
         embedding_channels=192,
         depths=(2, 2, 18, 2),
         input_resolution=input_resolution,
-        number_of_heads=(6,12,24,48),
+        number_of_heads=(6, 12, 24, 48),
         window_size=window_size,
+        dropout_path=dropout_path,  # 增加 stochastic depth 參數
         num_classes=num_classes,
         use_checkpoint=use_checkpoint,
         sequential_self_attention=sequential_self_attention
