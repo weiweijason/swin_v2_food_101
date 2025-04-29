@@ -598,12 +598,11 @@ if __name__ == "__main__":
         # 跳過載入預訓練權重，從頭開始訓練
         logger.info("從頭開始訓練模型，不使用預訓練權重")
         
-        # 使用 DDP 包裝模型，但不使用 find_unused_parameters，這可能導致通信問題
+        # 使用 DDP 包裝模型，不使用 find_unused_parameters 以減少通信開銷
         model = nn.parallel.DistributedDataParallel(
             model, 
             device_ids=[local_rank],
-            find_unused_parameters=False,  # 關閉該選項，減少通信開銷
-            timeout=1800  # 增加超時時間到30分鐘，防止長時間操作導致超時
+            find_unused_parameters=False  # 關閉該選項，減少通信開銷
         )
         
         # 禁用 torch.compile 與 DDP 的優化以避免衝突
