@@ -4,7 +4,7 @@ from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from torchvision import transforms
 from torchvision.transforms import RandAugment, RandomErasing
 from timm.data.mixup import Mixup
-from timm.data import Cutout
+# 移除 from timm.data import Cutout，因為新版 timm 中不存在此模塊
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from tqdm import tqdm
 import pandas as pd
