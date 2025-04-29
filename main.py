@@ -125,10 +125,10 @@ def prepare_dataframe(file_path, image_root, encoder):
 
 
 # Training Function with Mixup and Cutmix
-def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, scaler, epoch, logger, mixup_fn=None):
+def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, scaler, epoch, logger, mixup_fn=None, gradient_accumulation_steps=4):
     """
     使用混合精度訓練的訓練函數，可加速訓練並降低記憶體使用量
-    包含 Mixup 和 Cutmix 支援
+    包含 Mixup、Cutmix 及梯度累積支援
     """
     model.train()
     total_loss = 0
@@ -138,6 +138,12 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
     batch_processed = 0  # 追蹤成功處理的批次數量
     consecutive_nan_count = 0  # 計算連續出現NaN的次數
 
+    # 重設優化器，確保每個epoch開始時梯度為零
+    optimizer.zero_grad(set_to_none=True)
+    
+    # 追蹤累積步數
+    accumulation_counter = 0
+
     for i, (inputs, targets) in enumerate(tqdm(dataloader, desc="Training")):
         inputs, targets = inputs.to(device), targets.to(device)
         
@@ -145,12 +151,11 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
         if mixup_fn is not None:
             inputs, targets = mixup_fn(inputs, targets)
         
-        optimizer.zero_grad(set_to_none=True)  # 使用set_to_none=True可提供更好的性能和內存使用
-        
         # 使用混合精度前向傳播
         with autocast():
             outputs = model(inputs)
-            loss = criterion(outputs, targets)
+            # 計算loss時除以累積步數，以保持梯度規模一致
+            loss = criterion(outputs, targets) / gradient_accumulation_steps
         
         # 檢查 loss 是否為 NaN
         if torch.isnan(loss).any() or torch.isinf(loss).any():
@@ -173,47 +178,60 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
         # 使用GradScaler處理反向傳播
         scaler.scale(loss).backward()
         
-        # 在更新前應用梯度裁剪 - 使用指定的閾值 5.0
-        try:
-            # 檢查梯度是否已被 unscaled，避免重複調用
-            if any(p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()) for p in model.parameters() if p.requires_grad):
-                logger.warning(f"NaN/Inf detected in gradients before unscaling at epoch {epoch}, batch {i}!")
+        # 更新梯度累積計數器
+        accumulation_counter += 1
+
+        # 當達到指定的累積步數或是最後一個批次時，更新參數
+        is_last_batch = (i == len(dataloader) - 1)
+        if accumulation_counter == gradient_accumulation_steps or is_last_batch:
+            # 在更新前應用梯度裁剪
+            try:
+                # 檢查梯度是否已被 unscaled，避免重複調用
+                if any(p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()) for p in model.parameters() if p.requires_grad):
+                    logger.warning(f"NaN/Inf detected in gradients before unscaling at epoch {epoch}, batch {i}!")
+                    optimizer.zero_grad(set_to_none=True)
+                    accumulation_counter = 0
+                    continue
+                    
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            except RuntimeError as e:
+                logger.warning(f"RuntimeError during unscale_: {e}. Skipping this batch.")
+                optimizer.zero_grad(set_to_none=True)
+                accumulation_counter = 0
                 continue
+            
+            # 檢查梯度是否包含 NaN
+            valid_gradients = True
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        logger.warning(f"NaN/Inf detected in gradients for {name} at epoch {epoch}, batch {i}!")
+                        valid_gradients = False
+                        break
+            
+            # 只有在梯度有效時才更新參數
+            if valid_gradients:
+                # 更新參數
+                scaler.step(optimizer)
+                scaler.update()
                 
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)  # 將梯度裁剪設為5.0
-        except RuntimeError as e:
-            logger.warning(f"RuntimeError during unscale_: {e}. Skipping this batch.")
-            continue
-        
-        # 檢查梯度是否包含 NaN
-        valid_gradients = True
-        for name, param in model.named_parameters():
-            if param.grad is not None:
-                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                    logger.warning(f"NaN/Inf detected in gradients for {name} at epoch {epoch}, batch {i}!")
-                    valid_gradients = False
-                    break
-        
-        # 只有在梯度有效時才更新參數
-        if valid_gradients:
-            # 更新參數
-            scaler.step(optimizer)
-            scaler.update()
-            
-            # 只計算成功更新的批次
-            total_loss += loss.item()
-            
-            # 如果使用了 mixup，則不計算準確率（因為標籤是軟標籤）
-            if mixup_fn is None:
-                _, predicted = outputs.max(1)
-                total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
-            
-            batch_processed += 1
-        else:
-            nan_detected = True
-            continue
+                # 只計算成功更新的批次
+                total_loss += loss.item() * gradient_accumulation_steps  # 乘以累積步數恢復原始loss
+                
+                # 如果使用了 mixup，則不計算準確率（因為標籤是軟標籤）
+                if mixup_fn is None:
+                    _, predicted = outputs.max(1)
+                    total += targets.size(0)
+                    correct += predicted.eq(targets).sum().item()
+                
+                batch_processed += 1
+            else:
+                nan_detected = True
+                
+            # 重置優化器梯度和累積計數器
+            optimizer.zero_grad(set_to_none=True)
+            accumulation_counter = 0
 
     # 如果整個 epoch 中檢測到 NaN，則發出警告
     if nan_detected:
@@ -523,10 +541,26 @@ if __name__ == "__main__":
         train_sampler = DistributedSampler(train_dataset)
         test_sampler = DistributedSampler(test_dataset)
 
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler, 
-                                 num_workers=4, pin_memory=True, drop_last=True)
-        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, sampler=test_sampler, 
-                                num_workers=4, pin_memory=True)
+        # 更新數據加載器配置
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=BATCH_SIZE, 
+            sampler=train_sampler, 
+            num_workers=8,  # 增加從4到8
+            pin_memory=True, 
+            drop_last=True,
+            prefetch_factor=2,  # 預取因子設為2
+            persistent_workers=True  # 持久化工作進程，避免重複創建和銷毀
+        )
+        test_loader = DataLoader(
+            test_dataset, 
+            batch_size=BATCH_SIZE * 2,  # 測試時可用更大批次，因為不存儲梯度
+            sampler=test_sampler, 
+            num_workers=8,  # 增加從4到8
+            pin_memory=True,
+            prefetch_factor=2,  # 預取因子設為2
+            persistent_workers=True  # 持久化工作進程
+        )
 
         # 初始化 SwinV2 模型，使用新的參數
         model = swin_transformer_v2_base_classifier(
@@ -539,6 +573,15 @@ if __name__ == "__main__":
         )
         
         model = model.to(device)
+        
+        # 使用 torch.compile() 加速模型 (僅支援 PyTorch 2.0+)
+        if hasattr(torch, 'compile') and torch.__version__ >= '2.0.0':
+            try:
+                logger.info("使用 torch.compile() 加速模型")
+                model = torch.compile(model, mode='reduce-overhead')
+            except Exception as e:
+                logger.warning(f"torch.compile() 失敗: {e}，跳過編譯")
+                
         model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
         model._set_static_graph()  
 
