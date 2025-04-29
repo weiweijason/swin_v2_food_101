@@ -42,7 +42,7 @@ from swin_transformer_v2_classifier import swin_transformer_v2_base_classifier
 # 設置日誌格式
 def setup_logger(local_rank):
     # 創建日誌格式
-    log_format = '%(asctime)s - %(level別)s - Rank[%(rank)s] - %(message)s'
+    log_format = '%(asctime)s - %(levelname)s - Rank[%(rank)s] - %(message)s'
     date_format = '%Y-%m-%d %H:%M:%S'
     
     # 創建一個自定義的過濾器，添加rank信息
