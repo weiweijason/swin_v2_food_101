@@ -80,13 +80,11 @@ class SwinTransformerV2Classifier(nn.Module):
         # Initialize weights
         self.apply(self._init_weights)
 
-        # With this, using your model's actual last stage dimension:
-        # Assuming in_features is the dimension of your final features before the classifier
-        # This is typically the same value you're using for your head's input dimension
+        # 使用更穩定的特徵縮放，避免NaN問題
         in_features = self.backbone.num_features if hasattr(self.backbone, 'num_features') else self.head.in_features
         self.feature_scaling = nn.Sequential(
-            nn.BatchNorm1d(in_features, affine=False),  
-            nn.Identity()
+            nn.LayerNorm(in_features, elementwise_affine=False),  # 使用LayerNorm替代BatchNorm1d提高穩定性
+            nn.Dropout(0.1)  # 添加額外的dropout以防止過擬合
         )
     
     def _init_weights(self, m):

@@ -147,8 +147,8 @@ class WindowMultiHeadAttention(nn.Module):
         nn.init.trunc_normal_(self.meta_network[0].weight, std=.02)
         nn.init.trunc_normal_(self.meta_network[2].weight, std=.02)
         
-        # Init tau
-        self.register_parameter("tau", torch.nn.Parameter(torch.log(10 * torch.ones((1, number_of_heads, 1, 1)))))
+        # 修改tau初始化方式，使用更保守的值，避免注意力權重過大
+        self.register_parameter("tau", torch.nn.Parameter(torch.log(5.0 * torch.ones((1, number_of_heads, 1, 1)))))
         # Init pair-wise relative positions (log-spaced)
         self.__make_pair_wise_relative_positions()
 

@@ -257,10 +257,11 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
     total = 0
     nan_detected = False
     batch_processed = 0  # 追蹤成功處理的批次數量
+    consecutive_nan_count = 0  # 計算連續出現NaN的次數
 
-    for inputs, targets in tqdm(dataloader, desc="Training"):
+    for i, (inputs, targets) in enumerate(tqdm(dataloader, desc="Training")):
         inputs, targets = inputs.to(device), targets.to(device)
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)  # 使用set_to_none=True可提供更好的性能和內存使用
         
         # 使用混合精度前向傳播
         with autocast():
@@ -269,9 +270,21 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
         
         # 檢查 loss 是否為 NaN
         if torch.isnan(loss).any() or torch.isinf(loss).any():
-            logger.warning(f"NaN/Inf detected in loss at epoch {epoch}! Skipping this batch.")
+            logger.warning(f"NaN/Inf detected in loss at epoch {epoch}, batch {i}! Skipping this batch.")
             nan_detected = True
+            consecutive_nan_count += 1
+            
+            # 連續出現多個NaN時降低學習率
+            if consecutive_nan_count >= 5:
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = param_group['lr'] * 0.8  # 降低學習率到原來的80%
+                logger.warning(f"Reducing learning rate due to consecutive NaNs at epoch {epoch}")
+                consecutive_nan_count = 0  # 重置計數器
+                
             continue
+        
+        # 如果沒有NaN，重置連續計數
+        consecutive_nan_count = 0
         
         # 使用GradScaler處理反向傳播
         scaler.scale(loss).backward()
@@ -279,12 +292,12 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
         # 在更新前應用梯度裁剪 - 使用更嚴格的閾值
         try:
             # 檢查梯度是否已被 unscaled，避免重複調用
-            if any(p.grad is not None and torch.isnan(p.grad).any() for p in model.parameters() if p.requires_grad):
-                logger.warning(f"NaN detected in gradients before unscaling at epoch {epoch}!")
+            if any(p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any()) for p in model.parameters() if p.requires_grad):
+                logger.warning(f"NaN/Inf detected in gradients before unscaling at epoch {epoch}, batch {i}!")
                 continue
                 
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 將閾值從5.0降至1.0
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)  # 將閾值從1.0降至0.5增加穩定性
         except RuntimeError as e:
             logger.warning(f"RuntimeError during unscale_: {e}. Skipping this batch.")
             continue
@@ -294,7 +307,7 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
         for name, param in model.named_parameters():
             if param.grad is not None:
                 if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                    logger.warning(f"NaN/Inf detected in gradients for {name} at epoch {epoch}!")
+                    logger.warning(f"NaN/Inf detected in gradients for {name} at epoch {epoch}, batch {i}!")
                     valid_gradients = False
                     break
         
@@ -327,7 +340,9 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
         accuracy = 100. * correct / total
         avg_loss = total_loss / batch_processed if batch_processed > 0 else float('nan')
         
-    logger.info(f"Train Loss: {avg_loss:.3f} | Train Accuracy: {accuracy:.2f}% | Batches processed: {batch_processed}/{len(dataloader)}")
+    # 報告當前學習率
+    current_lr = [group['lr'] for group in optimizer.param_groups]
+    logger.info(f"Train Loss: {avg_loss:.3f} | Train Accuracy: {accuracy:.2f}% | Batches processed: {batch_processed}/{len(dataloader)} | LR: {current_lr}")
     
     # 更新調度器 - 傳入epoch參數
     scheduler.step(epoch)
@@ -513,25 +528,27 @@ if __name__ == "__main__":
 
         # 使用分層學習率，為骨幹和分類頭設置不同的學習率
         parameters = [
-            {'params': [p for n, p in model.named_parameters() if 'backbone' in n], 'lr': 5e-6},  # 降低骨幹網路學習率
-            {'params': [p for n, p in model.named_parameters() if 'head' in n], 'lr': 1e-5}  # 降低分類頭學習率
+            {'params': [p for n, p in model.named_parameters() if 'backbone' in n], 'lr': 1e-6},  # 進一步降低骨幹網路學習率
+            {'params': [p for n, p in model.named_parameters() if 'head' in n], 'lr': 5e-6}  # 降低分類頭學習率
         ]
         
         optimizer = optim.AdamW(
             parameters,
-            weight_decay=0.01  # 降低權重衰減值，防止數值不穩定
+            weight_decay=0.005  # 進一步降低權重衰減值，防止數值不穩定
         )
         
         # 加入標籤平滑提高泛化能力
         criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
         
-        # 使用更先進的學習率調度器
+        # 使用更穩定的學習率調度器
         scheduler = CosineLRScheduler(
             optimizer,
             t_initial=num_epochs,
-            lr_min=1e-6,
-            warmup_t=5,  # 5個epochs的預熱期
-            warmup_lr_init=1e-7
+            lr_min=1e-7,  # 將最小學習率降低
+            warmup_t=5,   # 保持5個epochs的預熱期
+            warmup_lr_init=5e-8,  # 降低熱身期初始學習率
+            cycle_limit=1,  # 確保只有一個週期
+            cycle_decay=0.5  # 增加週期衰減
         )
 
         # 初始化混合精度訓練的scaler
