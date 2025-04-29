@@ -358,7 +358,7 @@ if __name__ == "__main__":
         logger = setup_logger(local_rank)
 
         # 更新參數設置
-        BATCH_SIZE = 1024  # 從64增加到1024
+        BATCH_SIZE = 256  # 從64增加到1024
         IMAGE_SIZE = 256   # 從224增加到256
         WINDOW_SIZE = 8    # 從7增加到8
         NUM_EPOCHS = 30    # 從20增加到30
