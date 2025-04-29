@@ -74,20 +74,28 @@ class SwinTransformerV2Classifier(nn.Module):
         # Layer normalization
         self.norm = nn.LayerNorm(last_stage_channels)
         
-        # Classification head (global average pooling + linear)
-        self.head = nn.Linear(last_stage_channels, num_classes)
+        # 增加特徵增強層，提高特徵提取能力
+        self.feature_enhance = nn.Sequential(
+            nn.Linear(last_stage_channels, last_stage_channels),
+            nn.GELU(),
+            nn.Dropout(0.1),
+        )
         
-        # Initialize weights
-        self.apply(self._init_weights)
-
         # 使用更穩定的特徵縮放，避免NaN問題
         self.feature_scaling = nn.Sequential(
             nn.LayerNorm(last_stage_channels, elementwise_affine=False),  # 使用LayerNorm替代BatchNorm1d提高穩定性
             nn.Dropout(0.1)  # 添加額外的dropout以防止過擬合
         )
+        
+        # Classification head (global average pooling + linear)
+        self.head = nn.Linear(last_stage_channels, num_classes)
+        
+        # Initialize weights
+        self.apply(self._init_weights)
     
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
+            # 使用更穩定的初始化方法
             nn.init.trunc_normal_(m.weight, std=.02)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
@@ -124,6 +132,10 @@ class SwinTransformerV2Classifier(nn.Module):
         
         # Global average pooling
         x = x.reshape(B, H * W, C).mean(dim=1)  # B, C
+        
+        # 增強特徵表示
+        if hasattr(self, 'feature_enhance'):
+            x = self.feature_enhance(x)
         
         return x
     

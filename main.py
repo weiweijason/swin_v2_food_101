@@ -25,6 +25,8 @@ import sys
 import time
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
+import math
+from functools import partial
 
 # 設置多進程啟動方法為 'spawn'，這可以解決某些連接問題
 # 這必須在導入任何其他與 torch.multiprocessing 相關的模塊之前設置
@@ -40,7 +42,7 @@ from swin_transformer_v2_classifier import swin_transformer_v2_base_classifier
 # 設置日誌格式
 def setup_logger(local_rank):
     # 創建日誌格式
-    log_format = '%(asctime)s - %(levelname)s - Rank[%(rank)s] - %(message)s'
+    log_format = '%(asctime)s - %(level別)s - Rank[%(rank)s] - %(message)s'
     date_format = '%Y-%m-%d %H:%M:%S'
     
     # 創建一個自定義的過濾器，添加rank信息
