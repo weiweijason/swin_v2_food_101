@@ -235,7 +235,14 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
         
     # 報告當前學習率
     current_lr = [group['lr'] for group in optimizer.param_groups]
-    logger.info(f"Train Loss: {avg_loss:.3f} | Train Accuracy: {accuracy:.2f if not np.isnan(accuracy) else 'N/A (using mixup)'} | Batches processed: {batch_processed}/{len(dataloader)} | LR: {current_lr}")
+    
+    # 修正格式化問題：先判斷是否有準確率，然後再進行格式化
+    if np.isnan(accuracy):
+        accuracy_str = "N/A (using mixup)"
+    else:
+        accuracy_str = f"{accuracy:.2f}%"
+    
+    logger.info(f"Train Loss: {avg_loss:.3f} | Train Accuracy: {accuracy_str} | Batches processed: {batch_processed}/{len(dataloader)} | LR: {current_lr}")
     
     # 更新調度器
     scheduler.step(epoch)
