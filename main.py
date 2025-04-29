@@ -26,6 +26,14 @@ import time
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
 
+# 設置多進程啟動方法為 'spawn'，這可以解決某些連接問題
+# 這必須在導入任何其他與 torch.multiprocessing 相關的模塊之前設置
+try:
+    import multiprocessing
+    multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass
+
 # Import the SwinV2 classifier
 from swin_transformer_v2_classifier import swin_transformer_v2_base_classifier
 
@@ -568,24 +576,24 @@ if __name__ == "__main__":
         train_sampler = DistributedSampler(train_dataset)
         test_sampler = DistributedSampler(test_dataset)
 
-        # 更新數據加載器配置 - 充分利用128GB CPU記憶體，加速數據載入
+        # 更新數據加載器配置 - 修復連接問題
         train_loader = DataLoader(
             train_dataset, 
             batch_size=BATCH_SIZE, 
             sampler=train_sampler, 
-            num_workers=64,  # 從4增加到64，充分利用128GB CPU記憶體
+            num_workers=16,  # 減少工作進程數量，避免連接拒絕錯誤
             pin_memory=True, 
             drop_last=True,
-            prefetch_factor=4,  # 增加預取因子從2到4
+            prefetch_factor=2,  # 降低預取因子以減少資源需求
             persistent_workers=True
         )
         test_loader = DataLoader(
             test_dataset, 
-            batch_size=BATCH_SIZE // 2,  # 保持測試批次大小較小，避免GPU記憶體不足
+            batch_size=BATCH_SIZE // 2, 
             sampler=test_sampler, 
-            num_workers=64,  # 從4增加到64，充分利用CPU
+            num_workers=16,  # 減少工作進程數量
             pin_memory=True,
-            prefetch_factor=4,  # 增加預取因子從2到4
+            prefetch_factor=2,
             persistent_workers=True
         )
 
