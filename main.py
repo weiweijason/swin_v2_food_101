@@ -575,9 +575,9 @@ if __name__ == "__main__":
             logger.warning(f"Initial synchronization failed: {e}")
 
         # 更新參數設置 - 降低批次大小以減少通信負擔
-        BATCH_SIZE = 16  # 從32減小到16，減少通信負擔
-        IMAGE_SIZE = 192  # 保持不變
-        WINDOW_SIZE = 6  # 確保與window_size參數匹配
+        BATCH_SIZE = 32  # 從32減小到16，減少通信負擔
+        IMAGE_SIZE = 265  # 保持不變
+        WINDOW_SIZE = 16  # 確保與window_size參數匹配
         NUM_EPOCHS = 30    
         IMAGE_ROOT = "food-101/images"
         TRAIN_FILE = "food-101/meta/train.txt"
