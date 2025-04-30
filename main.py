@@ -587,7 +587,7 @@ if __name__ == "__main__":
         # 初始化 SwinV2 模型，使用新的參數
         model = swin_transformer_v2_base_classifier(
             input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
-            window_size=WINDOW_SIZE,
+            window_size=6,  # 修改窗口大小為6，使其能夠被圖像尺寸整除 (192可被6整除)
             num_classes=len(LABELS),
             use_checkpoint=True,  # 保留 checkpoint 功能以節省顯存
             dropout_path=0.1  # 降低 stochastic depth 率，減少計算負擔
