@@ -100,12 +100,27 @@ class SwinTransformerV2(nn.Module):
         """
         # Perform patch embedding
         output: torch.Tensor = self.patch_embedding(input)
-        # Init list to store feature
+        
+        # Add absolute position embedding if configured
+        if hasattr(self, 'absolute_pos_embedding') and self.absolute_pos_embedding is not None:
+            output = output + self.absolute_pos_embedding
+            
+        # Apply dropout if configured
+        if hasattr(self, 'pos_drop'):
+            output = self.pos_drop(output)
+            
+        # Init list to store features from each stage
         features: List[torch.Tensor] = []
+        
         # Forward pass of each stage
         for stage in self.stages:
-            output: torch.Tensor = stage(output)
+            # Apply checkpoint to save memory if configured
+            if hasattr(stage, 'use_checkpoint') and stage.use_checkpoint:
+                output = checkpoint.checkpoint(stage, output)
+            else:
+                output = stage(output)
             features.append(output)
+            
         return features
 
 

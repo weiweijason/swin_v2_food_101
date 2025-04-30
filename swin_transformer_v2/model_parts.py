@@ -128,7 +128,10 @@ class WindowMultiHeadAttention(nn.Module):
         self.in_features: int = in_features
         self.window_size: int = window_size
         self.number_of_heads: int = number_of_heads
+        self.head_dim: int = in_features // number_of_heads
         self.sequential_self_attention: bool = sequential_self_attention
+        self.scale: float = self.head_dim ** -0.5
+        
         # Init query, key and value mapping as a single layer
         self.mapping_qkv: nn.Module = nn.Linear(in_features=in_features, out_features=in_features * 3, bias=True)
         # Init attention dropout
@@ -147,8 +150,9 @@ class WindowMultiHeadAttention(nn.Module):
         nn.init.trunc_normal_(self.meta_network[0].weight, std=.02)
         nn.init.trunc_normal_(self.meta_network[2].weight, std=.02)
         
-        # 修改tau初始化方式，使用更保守的值，避免注意力權重過大
-        self.register_parameter("tau", torch.nn.Parameter(torch.log(5.0 * torch.ones((1, number_of_heads, 1, 1)))))
+        # 使用對數尺度的初始化，以確保更穩定的注意力計算
+        self.register_parameter("tau", torch.nn.Parameter(torch.log(10.0 * torch.ones((1, number_of_heads, 1, 1)))))
+        
         # Init pair-wise relative positions (log-spaced)
         self.__make_pair_wise_relative_positions()
 
@@ -156,14 +160,20 @@ class WindowMultiHeadAttention(nn.Module):
         """
         Method initializes the pair-wise relative positions to compute the positional biases
         """
-        indexes: torch.Tensor = torch.arange(self.window_size, device=self.tau.device)
-        coordinates: torch.Tensor = torch.stack(torch.meshgrid([indexes, indexes]), dim=0)
-        coordinates: torch.Tensor = torch.flatten(coordinates, start_dim=1)
-        relative_coordinates: torch.Tensor = coordinates[:, :, None] - coordinates[:, None, :]
-        relative_coordinates: torch.Tensor = relative_coordinates.permute(1, 2, 0).reshape(-1, 2).float()
-        relative_coordinates_log: torch.Tensor = torch.sign(relative_coordinates) \
-                                                 * torch.log(1. + relative_coordinates.abs())
-        self.register_buffer("relative_coordinates_log", relative_coordinates_log)
+        # 使用 arange 而不是 meshgrid 來提高效率
+        coords_h = torch.arange(self.window_size, device=self.tau.device)
+        coords_w = torch.arange(self.window_size, device=self.tau.device)
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))
+        coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
+        
+        # 計算相對位置座標
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
+        
+        # 使用 log-space 距離
+        relative_coords_log = torch.sign(relative_coords) * torch.log(1. + relative_coords.abs())
+        
+        self.register_buffer("relative_coords_log", relative_coords_log.view(-1, 2))
 
     def update_resolution(self,
                           new_window_size: int,
@@ -183,12 +193,18 @@ class WindowMultiHeadAttention(nn.Module):
         Method computes the relative positional encodings
         :return: (torch.Tensor) Relative positional encodings [1, number of heads, window size ** 2, window size ** 2]
         """
-        relative_position_bias: torch.Tensor = self.meta_network(self.relative_coordinates_log)
-        relative_position_bias: torch.Tensor = relative_position_bias.permute(1, 0)
-        relative_position_bias: torch.Tensor = relative_position_bias.reshape(self.number_of_heads,
-                                                                              self.window_size * self.window_size,
-                                                                              self.window_size * self.window_size)
-        return relative_position_bias.unsqueeze(0)
+        # 使用 meta network 生成相對位置編碼
+        relative_position_bias = self.meta_network(self.relative_coords_log)
+        relative_position_bias = relative_position_bias.view(
+            self.window_size * self.window_size, 
+            self.window_size * self.window_size, 
+            self.number_of_heads
+        ).permute(2, 0, 1)  # nH, Wh*Ww, Wh*Ww
+        
+        # 增加穩定性：將位置偏差限制在適當範圍內
+        relative_position_bias = 16 * torch.sigmoid(relative_position_bias)
+        
+        return relative_position_bias.unsqueeze(0)  # 1, nH, Wh*Ww, Wh*Ww
 
     def __self_attention(self,
                          query: torch.Tensor,
@@ -207,30 +223,38 @@ class WindowMultiHeadAttention(nn.Module):
         :param mask: (Optional[torch.Tensor]) Attention mask for the shift case
         :return: (torch.Tensor) Output feature map of the shape [batch size * windows, tokens, channels]
         """
-        # Update the normalization calculation for better numerical stability
-        query_norm = torch.norm(query, dim=-1, keepdim=True)
-        key_norm = torch.norm(key, dim=-1, keepdim=True)
-
-        # Compute attention with scaled cosine attention
-        attention_map = torch.einsum("bhqd, bhkd -> bhqk", query, key)
-        attention_map = attention_map / torch.clamp(query_norm * key_norm.transpose(-2, -1), min=1e-6)
-        attention_map = attention_map / self.tau.clamp(min=0.01)
-
-        # Apply relative positional encodings
-        attention_map: torch.Tensor = attention_map + self.__get_relative_positional_encodings()
-        # Apply mask if utilized
+        # 採用更穩定的注意力計算方式
+        # 計算 QK^T，使用 einsum 提高效率
+        attn = torch.einsum("bhqd, bhkd -> bhqk", query, key)
+        
+        # 標準化注意力權重：使用 scale 代替手動計算 norm 除法
+        attn = attn * self.scale
+        
+        # 應用 logit_scale 參數控制注意力權重的溫度
+        logit_scale = torch.clamp(self.tau, max=torch.log(torch.tensor(1./0.01, device=self.tau.device))).exp()
+        attn = attn * logit_scale
+        
+        # 應用相對位置偏差來增強位置感知能力
+        attn = attn + self.__get_relative_positional_encodings()
+        
+        # 應用遮罩（如果需要）
         if mask is not None:
             number_of_windows: int = mask.shape[0]
-            attention_map: torch.Tensor = attention_map.view(batch_size_windows // number_of_windows, number_of_windows,
-                                                             self.number_of_heads, tokens, tokens)
-            attention_map: torch.Tensor = attention_map + mask.unsqueeze(1).unsqueeze(0)
-            attention_map: torch.Tensor = attention_map.view(-1, self.number_of_heads, tokens, tokens)
-        attention_map: torch.Tensor = attention_map.softmax(dim=-1)
-        # Perform attention dropout
-        attention_map: torch.Tensor = self.attention_dropout(attention_map)
-        # Apply attention map and reshape
-        output: torch.Tensor = torch.einsum("bhal, bhlv -> bhav", attention_map, value)
-        output: torch.Tensor = output.permute(0, 2, 1, 3).reshape(batch_size_windows, tokens, -1)
+            attn = attn.view(batch_size_windows // number_of_windows, number_of_windows,
+                             self.number_of_heads, tokens, tokens)
+            attn = attn + mask.unsqueeze(1).unsqueeze(0)
+            attn = attn.view(-1, self.number_of_heads, tokens, tokens)
+        
+        # 應用 softmax 獲得注意力權重
+        attn = F.softmax(attn, dim=-1)
+        
+        # 應用 dropout
+        attn = self.attention_dropout(attn)
+        
+        # 應用注意力權重到 value 上
+        output = torch.einsum("bhal, bhlv -> bhav", attn, value)
+        output = output.permute(0, 2, 1, 3).reshape(batch_size_windows, tokens, -1)
+        
         return output
 
     def __sequential_self_attention(self,
@@ -250,36 +274,55 @@ class WindowMultiHeadAttention(nn.Module):
         :param mask: (Optional[torch.Tensor]) Attention mask for the shift case
         :return: (torch.Tensor) Output feature map of the shape [batch size * windows, tokens, channels]
         """
-        # Init output tensor
-        output: torch.Tensor = torch.ones_like(query)
-        # Compute relative positional encodings fist
-        relative_position_bias: torch.Tensor = self.__get_relative_positional_encodings()
-        # Iterate over query and key tokens
+        # 初始化輸出張量
+        output = torch.zeros_like(query)
+        
+        # 預先計算相對位置偏差，避免在循環中重複計算
+        relative_position_bias = self.__get_relative_positional_encodings()
+        
+        # 計算 key 的標準化係數（預先計算）
+        key_norm = torch.norm(key, dim=-1, keepdim=True).clamp(min=1e-6)
+        
+        # 迭代查詢和鍵值對
         for token_index_query in range(tokens):
-            # Compute attention map with scaled cosine attention
-            attention_map: torch.Tensor = \
-                torch.einsum("bhd, bhkd -> bhk", query[:, :, token_index_query], key) \
-                / torch.maximum(torch.norm(query[:, :, token_index_query], dim=-1, keepdim=True)
-                                * torch.norm(key, dim=-1, keepdim=False),
-                                torch.tensor(1e-06, device=query.device, dtype=query.dtype))
-            attention_map: torch.Tensor = attention_map / self.tau.clamp(min=0.01)[..., 0]
-            # Apply positional encodings
-            attention_map: torch.Tensor = attention_map + relative_position_bias[..., token_index_query, :]
-            # Apply mask if utilized
+            # 獲取當前查詢向量
+            q = query[:, :, token_index_query].unsqueeze(2)  # [B*W, H, 1, D]
+            
+            # 計算標準化的查詢向量
+            q_norm = torch.norm(q, dim=-1, keepdim=True).clamp(min=1e-6)
+            
+            # 計算注意力分數，使用 scaled dot-product
+            attn = torch.matmul(q, key.transpose(-2, -1))  # [B*W, H, 1, T]
+            attn = attn / (q_norm * key_norm.transpose(-2, -1))
+            
+            # 應用 scale 因子
+            logit_scale = torch.clamp(self.tau, max=torch.log(torch.tensor(1./0.01, device=self.tau.device))).exp()
+            attn = attn / logit_scale
+            
+            # 應用相對位置偏差
+            attn = attn + relative_position_bias[..., token_index_query:token_index_query+1, :]
+            
+            # 應用遮罩（如果需要）
             if mask is not None:
-                number_of_windows: int = mask.shape[0]
-                attention_map: torch.Tensor = attention_map.view(batch_size_windows // number_of_windows,
-                                                                 number_of_windows, self.number_of_heads, 1,
-                                                                 tokens)
-                attention_map: torch.Tensor = attention_map \
-                                              + mask.unsqueeze(1).unsqueeze(0)[..., token_index_query, :].unsqueeze(3)
-                attention_map: torch.Tensor = attention_map.view(-1, self.number_of_heads, tokens)
-            attention_map: torch.Tensor = attention_map.softmax(dim=-1)
-            # Perform attention dropout
-            attention_map: torch.Tensor = self.attention_dropout(attention_map)
-            # Apply attention map and reshape
-            output[:, :, token_index_query] = torch.einsum("bhl, bhlv -> bhv", attention_map, value)
-        output: torch.Tensor = output.permute(0, 2, 1, 3).reshape(batch_size_windows, tokens, -1)
+                number_of_windows = mask.shape[0]
+                attn_view = attn.view(batch_size_windows // number_of_windows, 
+                                     number_of_windows, self.number_of_heads, 1, tokens)
+                mask_view = mask.unsqueeze(1).unsqueeze(0)[..., token_index_query:token_index_query+1, :]
+                attn_view = attn_view + mask_view
+                attn = attn_view.view(-1, self.number_of_heads, 1, tokens)
+            
+            # 應用 softmax 獲得注意力權重
+            attn = F.softmax(attn, dim=-1)
+            
+            # 應用 dropout
+            attn = self.attention_dropout(attn)
+            
+            # 應用注意力權重到 value 上
+            output[:, :, token_index_query] = torch.matmul(attn, value).squeeze(2)
+        
+        # 重塑輸出
+        output = output.permute(0, 2, 1, 3).reshape(batch_size_windows, tokens, -1)
+        
         return output
 
     def forward(self,
@@ -291,30 +334,44 @@ class WindowMultiHeadAttention(nn.Module):
         :param mask: (Optional[torch.Tensor]) Attention mask for the shift case
         :return: (torch.Tensor) Output tensor of the shape [batch size * windows, channels, height, width]
         """
-        # Save original shape
-        batch_size_windows, channels, height, width = input.shape  # type: int, int, int, int
-        tokens: int = height * width
-        # Reshape input to [batch size * windows, tokens (height * width), channels]
-        input: torch.Tensor = input.reshape(batch_size_windows, channels, tokens).permute(0, 2, 1)
-        # Perform query, key, and value mapping
-        query_key_value: torch.Tensor = self.mapping_qkv(input)
-        query_key_value: torch.Tensor = query_key_value.view(batch_size_windows, tokens, 3, self.number_of_heads,
-                                                             channels // self.number_of_heads).permute(2, 0, 3, 1, 4)
-        query, key, value = query_key_value[0], query_key_value[1], query_key_value[2]
-        # Perform attention
+        # 保存原始形狀
+        batch_size_windows, channels, height, width = input.shape
+        tokens = height * width
+        
+        # 將輸入重塑為 [batch_size_windows, tokens, channels]
+        input = input.reshape(batch_size_windows, channels, tokens).permute(0, 2, 1)
+        
+        # 執行 QKV 映射
+        qkv = self.mapping_qkv(input)
+        
+        # 重塑 QKV 以便分離 Q、K、V
+        qkv = qkv.reshape(batch_size_windows, tokens, 3, self.number_of_heads, channels // self.number_of_heads)
+        qkv = qkv.permute(2, 0, 3, 1, 4)  # 3, B*W, H, T, C/H
+        
+        # 分離 Q、K、V
+        query, key, value = qkv[0], qkv[1], qkv[2]
+        
+        # 執行注意力機制
         if self.sequential_self_attention:
-            output: torch.Tensor = self.__sequential_self_attention(query=query, key=key, value=value,
-                                                                    batch_size_windows=batch_size_windows,
-                                                                    tokens=tokens,
-                                                                    mask=mask)
+            output = self.__sequential_self_attention(
+                query=query, key=key, value=value,
+                batch_size_windows=batch_size_windows, tokens=tokens,
+                mask=mask
+            )
         else:
-            output: torch.Tensor = self.__self_attention(query=query, key=key, value=value,
-                                                         batch_size_windows=batch_size_windows, tokens=tokens,
-                                                         mask=mask)
-        # Perform linear mapping and dropout
-        output: torch.Tensor = self.projection_dropout(self.projection(output))
-        # Reshape output to original shape [batch size * windows, channels, height, width]
-        output: torch.Tensor = output.permute(0, 2, 1).view(batch_size_windows, channels, height, width)
+            output = self.__self_attention(
+                query=query, key=key, value=value,
+                batch_size_windows=batch_size_windows, tokens=tokens,
+                mask=mask
+            )
+        
+        # 執行線性映射和 dropout
+        output = self.projection(output)
+        output = self.projection_dropout(output)
+        
+        # 將輸出重塑為原始形狀 [batch_size_windows, channels, height, width]
+        output = output.permute(0, 2, 1).reshape(batch_size_windows, channels, height, width)
+        
         return output
 
 

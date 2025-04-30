@@ -91,6 +91,15 @@ class NCCLTimeoutHandler:
 # 全局超時處理器
 timeout_handler = NCCLTimeoutHandler()
 
+# 添加檢查確保圖像尺寸與窗口尺寸相容
+def check_img_size_compatibility(img_size, window_size):
+    if img_size % window_size != 0:
+        print(f"WARNING: img_size {img_size} is not divisible by window_size {window_size}")
+        new_img_size = (img_size // window_size) * window_size
+        print(f"Adjusting img_size to {new_img_size}")
+        return new_img_size
+    return img_size
+
 # 設置日誌格式
 def setup_logger(local_rank):
     # 創建日誌格式
@@ -574,8 +583,8 @@ if __name__ == "__main__":
         except Exception as e:
             logger.warning(f"Initial synchronization failed: {e}")
 
-        # 更新參數設置 - 降低批次大小以減少通信負擔
-        BATCH_SIZE = 32  # 從32減小到16，減少通信負擔
+        # 更新參數設置 - 提高批次大小以利用更多 GPU 記憶體
+        BATCH_SIZE = 64  # 從32增加到64，充分利用 GPU 記憶體
         IMAGE_SIZE = 256  # 保持不變
         WINDOW_SIZE = 8  # 確保與window_size參數匹配
         NUM_EPOCHS = 30    
