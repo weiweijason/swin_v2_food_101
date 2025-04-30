@@ -28,6 +28,7 @@ from torch.utils.tensorboard import SummaryWriter
 import math
 from functools import partial
 import signal
+import traceback
 
 # 設置 NCCL 超時環境變數
 os.environ["NCCL_BLOCKING_WAIT"] = "1"  # 使用阻塞等待模式，提高穩定性
@@ -38,6 +39,8 @@ os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"  # 啟用非同步錯誤處理
 os.environ["NCCL_SOCKET_NTHREADS"] = "4"  # 設置NCCL Socket通訊的線程數
 os.environ["NCCL_NSOCKS_PERTHREAD"] = "4"  # 設置每個線程的Socket數量
 os.environ["NCCL_TREE_THRESHOLD"] = "0"  # 強制使用樹算法，可能更穩定但較慢
+# 設置NCCL超時時間（秒），遠高於默認的600秒
+os.environ["NCCL_TIMEOUT"] = str(3600)  # 1小時
 
 # 設置多進程啟動方法為 'spawn'，這可以解決某些連接問題
 # 這必須在導入任何其他與 torch.multiprocessing 相關的模塊之前設置
@@ -91,7 +94,7 @@ timeout_handler = NCCLTimeoutHandler()
 # 設置日誌格式
 def setup_logger(local_rank):
     # 創建日誌格式
-    log_format = '%(asctime)s - %(level別)s - Rank[%(rank)s] - %(message)s'
+    log_format = '%(asctime)s - %(levelname)s - Rank[%(rank)s] - %(message)s'
     date_format = '%Y-%m-%d %H:%M:%S'
     
     # 創建一個自定義的過濾器，添加rank信息
@@ -539,33 +542,29 @@ if __name__ == "__main__":
     try:
         # Get the local rank from environment variable
         local_rank = int(os.environ["LOCAL_RANK"])
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+        rank = int(os.environ.get("RANK", 0))
+        
         torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
-        
-        # 設置NCCL超時時間（秒），遠高於默認的600秒
-        os.environ["NCCL_TIMEOUT"] = str(3600)  # 1小時
         
         # 初始化超時處理器
         timeout_handler.set_rank(local_rank)
         
-        # 初始化進程組（使用NCCL後端，但設置更高的超時）
-        store = dist.FileStore('/tmp/nccl_shared_file', dist.get_world_size())
-        
-        # 使用更高的超時值初始化進程組
+        # 使用更高的超時值初始化進程組 (修正方法，移除FileStore)
         dist.init_process_group(
             backend='nccl',
             init_method='env://',
-            store=store,
-            world_size=int(os.environ.get("WORLD_SIZE", 1)),
-            rank=local_rank,
             timeout=datetime.timedelta(seconds=3600)  # 設置為1小時
         )
 
-        print(f"Process initialized with rank {local_rank}")
+        print(f"Process initialized with rank {local_rank}/{world_size}")
 
         # 設置日誌
         logger = setup_logger(local_rank)
-        logger.info(f"NCCL Version: {torch.cuda.nccl.version()}")
+        logger.info(f"CUDA available: {torch.cuda.is_available()}")
+        if hasattr(torch.cuda, 'nccl') and hasattr(torch.cuda.nccl, 'version'):
+            logger.info(f"NCCL Version: {torch.cuda.nccl.version()}")
         logger.info(f"NCCL Timeout set to {os.environ.get('NCCL_TIMEOUT', 'default')} seconds")
 
         # 嘗試進行初始同步，確認集體通信正常
