@@ -27,6 +27,17 @@ from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
 import math
 from functools import partial
+import signal
+
+# 設置 NCCL 超時環境變數
+os.environ["NCCL_BLOCKING_WAIT"] = "1"  # 使用阻塞等待模式，提高穩定性
+os.environ["NCCL_SOCKET_IFNAME"] = "^lo,docker"  # 避免使用回環或Docker介面
+os.environ["NCCL_DEBUG"] = "INFO"  # 啟用NCCL調試信息
+os.environ["NCCL_IB_TIMEOUT"] = "23"  # 增加 InfiniBand 超時時間
+os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"  # 啟用非同步錯誤處理
+os.environ["NCCL_SOCKET_NTHREADS"] = "4"  # 設置NCCL Socket通訊的線程數
+os.environ["NCCL_NSOCKS_PERTHREAD"] = "4"  # 設置每個線程的Socket數量
+os.environ["NCCL_TREE_THRESHOLD"] = "0"  # 強制使用樹算法，可能更穩定但較慢
 
 # 設置多進程啟動方法為 'spawn'，這可以解決某些連接問題
 # 這必須在導入任何其他與 torch.multiprocessing 相關的模塊之前設置
@@ -39,10 +50,48 @@ except RuntimeError:
 # Import the SwinV2 classifier
 from swin_transformer_v2_classifier import swin_transformer_v2_base_classifier
 
+# 設置全局超時處理機制
+class NCCLTimeoutHandler:
+    def __init__(self, timeout=1800):  # 預設超時時間為30分鐘
+        self.timeout = timeout
+        self.start_time = None
+        self.active = False
+        self.prev_handler = None
+        self.local_rank = -1
+
+    def set_rank(self, rank):
+        self.local_rank = rank
+
+    def start(self):
+        if not self.active:
+            self.active = True
+            self.start_time = time.time()
+            self.prev_handler = signal.signal(signal.SIGALRM, self._handler)
+            signal.alarm(self.timeout)
+
+    def _handler(self, signum, frame):
+        elapsed = time.time() - self.start_time
+        print(f"[Rank {self.local_rank}] Operation timeout after {elapsed:.2f} seconds. Terminating process.")
+        # 主動終止進程，這比等待超時錯誤更乾淨
+        os._exit(1)
+
+    def stop(self):
+        if self.active:
+            signal.alarm(0)
+            if self.prev_handler is not None:
+                signal.signal(signal.SIGALRM, self.prev_handler)
+            self.active = False
+
+    def __del__(self):
+        self.stop()
+
+# 全局超時處理器
+timeout_handler = NCCLTimeoutHandler()
+
 # 設置日誌格式
 def setup_logger(local_rank):
     # 創建日誌格式
-    log_format = '%(asctime)s - %(levelname)s - Rank[%(rank)s] - %(message)s'
+    log_format = '%(asctime)s - %(level別)s - Rank[%(rank)s] - %(message)s'
     date_format = '%Y-%m-%d %H:%M:%S'
     
     # 創建一個自定義的過濾器，添加rank信息
@@ -82,6 +131,18 @@ def setup_logger(local_rank):
     
     return logger
 
+# 用於同步所有進程的輔助函數
+def synchronize():
+    """
+    同步所有分散式進程
+    """
+    if not dist.is_available() or not dist.is_initialized():
+        return
+    world_size = dist.get_world_size()
+    if world_size == 1:
+        return
+    dist.barrier()
+
 # Updated Label Encoder
 class Label_encoder:
     def __init__(self, labels):
@@ -109,11 +170,17 @@ class Food101Dataset(Dataset):
         label = self.dataframe.iloc[idx]['label']
         label = self.encoder.get_idx(label)
 
-        image = Image.open(img_path).convert("RGB")
-        if self.transform:
-            image = self.transform(image)
-
-        return image, label
+        # 增加異常處理，確保文件存在且可讀
+        try:
+            image = Image.open(img_path).convert("RGB")
+            if self.transform:
+                image = self.transform(image)
+            return image, label
+        except Exception as e:
+            print(f"Error loading image {img_path}: {e}")
+            # 返回一個隨機生成的圖像和原始標籤，而不是拋出異常
+            dummy_image = torch.randn(3, 192, 192)
+            return dummy_image, label
 
 
 # Updated prepare_dataframe function
@@ -125,10 +192,13 @@ def prepare_dataframe(file_path, image_root, encoder):
     for line in lines:
         category, img_name = line.split('/')
         if category in encoder.labels:
-            data.append({
-                'label': category,
-                'path': f"{image_root}/{category}/{img_name}.jpg"
-            })
+            img_path = f"{image_root}/{category}/{img_name}.jpg"
+            # 檢查文件是否存在
+            if os.path.exists(img_path):
+                data.append({
+                    'label': category,
+                    'path': img_path
+                })
 
     df = pd.DataFrame(data)
     return shuffle(df)
@@ -152,6 +222,7 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
     nan_detected = False
     batch_processed = 0  # 追蹤成功處理的批次數量
     consecutive_nan_count = 0  # 計算連續出現NaN的次數
+    timeout_count = 0  # 計算可能的超時批次數
 
     # 重設優化器，確保每個epoch開始時梯度為零
     optimizer.zero_grad(set_to_none=True)
@@ -160,6 +231,9 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
     accumulation_counter = 0
 
     for i, (inputs, targets) in enumerate(tqdm(dataloader, desc="Training")):
+        # 監控處理批次時間，以偵測潛在的超時問題
+        batch_start_time = time.time()
+        
         inputs, targets = inputs.to(device), targets.to(device)
         
         # 記錄原始標籤以計算近似準確率
@@ -192,7 +266,24 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
         consecutive_nan_count = 0
         
         # 使用GradScaler處理反向傳播
-        scaler.scale(loss).backward()
+        try:
+            scaler.scale(loss).backward()
+        except RuntimeError as e:
+            if "NCCL" in str(e) or "timeout" in str(e).lower():
+                logger.error(f"NCCL error during backward pass: {e}")
+                timeout_count += 1
+                if timeout_count >= 3:
+                    logger.critical("Too many NCCL errors, attempting recovery...")
+                    # 嘗試主動進行同步
+                    try:
+                        synchronize()
+                        timeout_count = 0
+                    except:
+                        logger.critical("Failed to synchronize processes, skipping batch")
+                continue
+            else:
+                logger.error(f"Error during backward pass: {e}")
+                continue
         
         # 更新梯度累積計數器
         accumulation_counter += 1
@@ -212,8 +303,29 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
                 continue
             
             # 更新參數
-            scaler.step(optimizer)
-            scaler.update()
+            try:
+                # 設置超時保護
+                timeout_handler.start()
+                scaler.step(optimizer)
+                # 操作完成，停止超時保護
+                timeout_handler.stop()
+                scaler.update()
+            except RuntimeError as e:
+                if "NCCL" in str(e) or "timeout" in str(e).lower():
+                    logger.error(f"NCCL error during optimizer step: {e}")
+                    timeout_count += 1
+                    if timeout_count >= 3:
+                        logger.critical("Too many NCCL errors, attempting recovery...")
+                        try:
+                            synchronize()
+                            timeout_count = 0
+                        except:
+                            pass
+                else:
+                    logger.error(f"Error during optimizer step: {e}")
+                optimizer.zero_grad(set_to_none=True)
+                accumulation_counter = 0
+                continue
             
             # 只計算成功更新的批次
             total_loss += loss.item() * gradient_accumulation_steps  # 乘以累積步數恢復原始loss
@@ -238,8 +350,13 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
             accumulation_counter = 0
             
             # 每隔一段時間釋放未使用的記憶體
-            if i % 50 == 0:
+            if i % 20 == 0:  # 增加釋放頻率
                 torch.cuda.empty_cache()
+        
+        # 檢測批次處理時間，如果過長則發出警告
+        batch_time = time.time() - batch_start_time
+        if batch_time > 30:  # 30秒作為警告閾值
+            logger.warning(f"Batch {i} took {batch_time:.2f} seconds to process. Possible bottleneck detected.")
 
     # 如果整個 epoch 中檢測到 NaN，則發出警告
     if nan_detected:
@@ -287,31 +404,59 @@ def test_epoch(model, dataloader, criterion, device, logger):
     correct = 0
     total = 0
     
+    # 檢測計數器
+    timeout_count = 0
+    
     # 使用較小的批次進行處理，減少記憶體使用
     # 確保使用torch.no_grad()上下文，避免保存不必要的梯度信息
     with torch.no_grad():
-        for inputs, targets in tqdm(dataloader, desc="Testing"):
-            inputs, targets = inputs.to(device), targets.to(device)
+        for i, (inputs, targets) in enumerate(tqdm(dataloader, desc="Testing")):
+            # 設置超時保護
+            timeout_handler.start()
             
-            # 使用純淨的推理模式
-            outputs = model(inputs)
-            
-            # 計算損失
-            loss = criterion(outputs, targets)
-            
-            # 累積損失和正確預測數
-            total_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
-            
-            # 主動清除不需要的張量以釋放記憶體
-            del outputs, loss, predicted
-            torch.cuda.empty_cache()  # 顯式清空CUDA快取
+            try:
+                inputs, targets = inputs.to(device), targets.to(device)
+                
+                # 使用純淨的推理模式
+                outputs = model(inputs)
+                
+                # 計算損失
+                loss = criterion(outputs, targets)
+                
+                # 累積損失和正確預測數
+                total_loss += loss.item()
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+                
+                # 主動清除不需要的張量以釋放記憶體
+                del outputs, loss, predicted
+                
+                # 每10個批次清空一次CUDA快取
+                if i % 10 == 0:
+                    torch.cuda.empty_cache()
+                
+                # 停止超時保護
+                timeout_handler.stop()
+                
+            except RuntimeError as e:
+                timeout_handler.stop()
+                if "NCCL" in str(e) or "timeout" in str(e).lower():
+                    logger.error(f"NCCL error during testing: {e}")
+                    timeout_count += 1
+                    if timeout_count >= 3:
+                        logger.critical("Too many NCCL errors during testing, attempting recovery...")
+                        try:
+                            synchronize()
+                            timeout_count = 0
+                        except:
+                            pass
+                else:
+                    logger.error(f"Error during testing: {e}")
     
     # 計算平均損失和準確率
-    accuracy = 100. * correct / total
-    avg_loss = total_loss / len(dataloader)
+    accuracy = 100. * correct / total if total > 0 else 0.0
+    avg_loss = total_loss / len(dataloader) if len(dataloader) > 0 else float('nan')
     logger.info(f"Test Loss: {avg_loss:.3f} | Test Accuracy: {accuracy:.2f}%")
     return accuracy, avg_loss
 
@@ -397,17 +542,43 @@ if __name__ == "__main__":
         torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
         
-        dist.init_process_group(backend='nccl', init_method='env://')
+        # 設置NCCL超時時間（秒），遠高於默認的600秒
+        os.environ["NCCL_TIMEOUT"] = str(3600)  # 1小時
+        
+        # 初始化超時處理器
+        timeout_handler.set_rank(local_rank)
+        
+        # 初始化進程組（使用NCCL後端，但設置更高的超時）
+        store = dist.FileStore('/tmp/nccl_shared_file', dist.get_world_size())
+        
+        # 使用更高的超時值初始化進程組
+        dist.init_process_group(
+            backend='nccl',
+            init_method='env://',
+            store=store,
+            world_size=int(os.environ.get("WORLD_SIZE", 1)),
+            rank=local_rank,
+            timeout=datetime.timedelta(seconds=3600)  # 設置為1小時
+        )
 
         print(f"Process initialized with rank {local_rank}")
 
         # 設置日誌
         logger = setup_logger(local_rank)
+        logger.info(f"NCCL Version: {torch.cuda.nccl.version()}")
+        logger.info(f"NCCL Timeout set to {os.environ.get('NCCL_TIMEOUT', 'default')} seconds")
 
-        # 更新參數設置
-        BATCH_SIZE = 32  # 從64減小到32，減少記憶體需求
-        IMAGE_SIZE = 192  # 從224減小到192，減少記憶體需求
-        WINDOW_SIZE = 7    
+        # 嘗試進行初始同步，確認集體通信正常
+        try:
+            synchronize()
+            logger.info("Initial synchronization successful")
+        except Exception as e:
+            logger.warning(f"Initial synchronization failed: {e}")
+
+        # 更新參數設置 - 降低批次大小以減少通信負擔
+        BATCH_SIZE = 16  # 從32減小到16，減少通信負擔
+        IMAGE_SIZE = 192  # 保持不變
+        WINDOW_SIZE = 6  # 確保與window_size參數匹配
         NUM_EPOCHS = 30    
         IMAGE_ROOT = "food-101/images"
         TRAIN_FILE = "food-101/meta/train.txt"
@@ -584,13 +755,13 @@ if __name__ == "__main__":
             persistent_workers=True
         )
 
-        # 初始化 SwinV2 模型，使用新的參數
+        # 初始化 SwinV2 模型，使用容錯性更高的配置
         model = swin_transformer_v2_base_classifier(
             input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
-            window_size=6,  # 修改窗口大小為6，使其能夠被圖像尺寸整除 (192可被6整除)
+            window_size=6,  # 保持窗口大小與圖像尺寸兼容
             num_classes=len(LABELS),
-            use_checkpoint=True,  # 保留 checkpoint 功能以節省顯存
-            dropout_path=0.1  # 降低 stochastic depth 率，減少計算負擔
+            use_checkpoint=True,  # 使用checkpoint可以減少內存使用但增加計算
+            dropout_path=0.1  # 保持較低的dropout以提高穩定性
         )
         
         model = model.to(device)
@@ -598,32 +769,26 @@ if __name__ == "__main__":
         # 跳過載入預訓練權重，從頭開始訓練
         logger.info("從頭開始訓練模型，不使用預訓練權重")
         
-        # 使用 DDP 包裝模型，不使用 find_unused_parameters 以減少通信開銷
+        # 使用 DDP 包裝模型，但進行更安全的配置
         model = nn.parallel.DistributedDataParallel(
             model, 
             device_ids=[local_rank],
-            find_unused_parameters=False  # 關閉該選項，減少通信開銷
+            find_unused_parameters=False,  # 關閉該選項，減少通信開銷
+            broadcast_buffers=False  # 關閉緩衝區廣播以減少通信量
         )
         
-        # 禁用 torch.compile 與 DDP 的優化以避免衝突
+        # 禁用可能與分散式訓練衝突的優化選項
         if hasattr(torch, '_dynamo'):
             torch._dynamo.config.optimize_ddp = False
-            # 允許在出錯時回退到 eager 模式
             torch._dynamo.config.suppress_errors = True
-            
-            if hasattr(torch, 'compile') and torch.__version__ >= '2.0.0':
-                try:
-                    logger.info("使用 torch.compile() 加速模型，已禁用 optimize_ddp")
-                    # 模型已經是 DDP 包裝的，不能直接編譯，所以我們編譯內部模塊
-                    model.module = torch.compile(model.module, mode='reduce-overhead')
-                except Exception as e:
-                    logger.warning(f"torch.compile() 失敗: {e}，跳過編譯")
-
-        # 使用 AdamW 優化器並設置初始學習率為 1e-4，比原來的4e-5更高
+            torch._dynamo.config.cache_size_limit = 32  # 限制快取大小
+        
+        # 使用 AdamW 優化器，但降低學習率以提高穩定性
         optimizer = optim.AdamW(
             model.parameters(),
-            lr=1e-4,  # 提高初始學習率
-            weight_decay=0.05
+            lr=5e-5,  # 降低學習率，從1e-4降至5e-5
+            weight_decay=0.05,
+            eps=1e-8  # 增加epsilon值以提高數值穩定性
         )
         
         # 使用適合 Mixup/Cutmix 的損失函數
@@ -634,14 +799,18 @@ if __name__ == "__main__":
             optimizer,
             t_initial=NUM_EPOCHS,
             lr_min=1e-6,
-            warmup_t=10,  # 增加預熱期
+            warmup_t=10,  # 保持10個epoch的預熱期
             warmup_lr_init=1e-7,
             cycle_limit=1,
             t_in_epochs=True,
         )
 
-        # 初始化混合精度訓練的scaler
-        scaler = GradScaler()
+        # 初始化混合精度訓練的scaler，降低增長率以提高穩定性
+        scaler = GradScaler(
+            growth_factor=1.5,  # 降低從2.0到1.5
+            backoff_factor=0.5,
+            growth_interval=100  # 增加增長間隔
+        )
         
         # 在主進程上初始化TensorBoard writer
         if local_rank == 0:
@@ -654,24 +823,91 @@ if __name__ == "__main__":
             logger.info(f"- Window size: {WINDOW_SIZE}x{WINDOW_SIZE}")
             logger.info(f"- Batch size: {BATCH_SIZE}")
             logger.info(f"- Epochs: {NUM_EPOCHS}")
-            logger.info(f"- Learning rate: {4e-5}")
+            logger.info(f"- Learning rate: {5e-5}")
             logger.info(f"- Weight decay: 0.05")
             logger.info(f"- Augmentations: RandAugment, Mixup, Cutmix, RandomErasing")
-            logger.info(f"- Stochastic depth: 0.3")
+            logger.info(f"- Stochastic depth: 0.1")
         
+        # 添加定期檢查點保存機制，以便在出現錯誤時恢復訓練
+        checkpoint_dir = "checkpoints"
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        # 嘗試加載檢查點（如果存在）
+        start_epoch = 0
         best_acc = 0
-        for epoch in range(NUM_EPOCHS):
+        checkpoint_path = os.path.join(checkpoint_dir, "latest_checkpoint.pth")
+        
+        if os.path.exists(checkpoint_path):
+            logger.info(f"Loading checkpoint from {checkpoint_path}")
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location=device)
+                model.module.load_state_dict(checkpoint['model_state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                scaler.load_state_dict(checkpoint['scaler_state_dict'])
+                start_epoch = checkpoint['epoch'] + 1
+                best_acc = checkpoint['best_acc']
+                logger.info(f"Checkpoint loaded. Resuming from epoch {start_epoch}")
+            except Exception as e:
+                logger.warning(f"Failed to load checkpoint: {e}")
+        
+        # 主訓練循環
+        for epoch in range(start_epoch, NUM_EPOCHS):
             logger.info(f"\nEpoch {epoch + 1}/{NUM_EPOCHS}")
+            
+            # 設置epoch以確保shuffling在每個epoch都不同
             train_sampler.set_epoch(epoch)
             
+            # 在訓練開始前進行同步
+            try:
+                synchronize()
+            except:
+                logger.warning("Failed to synchronize before training epoch")
+            
             # 在訓練時使用 mixup_fn
-            train_acc, train_loss = train_epoch_amp(
-                model, train_loader, optimizer, scheduler, criterion, 
-                device, scaler, epoch, logger, mixup_fn=mixup_fn
-            )
+            try:
+                train_acc, train_loss = train_epoch_amp(
+                    model, train_loader, optimizer, scheduler, criterion, 
+                    device, scaler, epoch, logger, mixup_fn=mixup_fn
+                )
+            except Exception as e:
+                logger.error(f"Error during training epoch: {e}")
+                logger.error(traceback.format_exc())
+                
+                # 儲存緊急檢查點
+                if local_rank == 0:
+                    emergency_path = os.path.join(checkpoint_dir, f"emergency_epoch_{epoch}.pth")
+                    torch.save({
+                        'epoch': epoch,
+                        'model_state_dict': model.module.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict(),
+                        'scaler_state_dict': scaler.state_dict(),
+                        'best_acc': best_acc
+                    }, emergency_path)
+                    logger.info(f"Emergency checkpoint saved to {emergency_path}")
+                
+                # 嘗試重新同步進程
+                try:
+                    synchronize()
+                except:
+                    logger.critical("Failed to recover after training error")
+                continue
+            
+            # 在測試前進行同步
+            try:
+                synchronize()
+            except:
+                logger.warning("Failed to synchronize before evaluation")
             
             # 在測試時不使用 mixup，使用標準的 CrossEntropyLoss
-            test_acc, test_loss = test_epoch(model, test_loader, nn.CrossEntropyLoss(), device, logger)
+            try:
+                test_acc, test_loss = test_epoch(model, test_loader, nn.CrossEntropyLoss(), device, logger)
+            except Exception as e:
+                logger.error(f"Error during evaluation: {e}")
+                logger.error(traceback.format_exc())
+                test_acc = 0.0
+                test_loss = float('nan')
             
             # 在主進程上記錄到TensorBoard
             if local_rank == 0:
@@ -684,12 +920,31 @@ if __name__ == "__main__":
                 
                 # 記錄學習率
                 writer.add_scalar('Learning_rate', optimizer.param_groups[0]['lr'], epoch)
-            
-            if test_acc > best_acc:
-                best_acc = test_acc
-                if local_rank == 0:
-                    torch.save(model.state_dict(), f'swinv2_food101_best.pth')
+                
+                # 儲存定期檢查點
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.module.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'scaler_state_dict': scaler.state_dict(),
+                    'best_acc': best_acc
+                }, checkpoint_path)
+                
+                # 如果是最佳結果則儲存為最佳模型
+                if test_acc > best_acc:
+                    best_acc = test_acc
+                    torch.save(model.module.state_dict(), f'swinv2_food101_best.pth')
                     logger.info(f"New best model saved with accuracy: {test_acc:.2f}%")
+            
+            # 在epoch結束後確保所有進程同步
+            try:
+                synchronize()
+            except:
+                logger.warning("Failed to synchronize after epoch")
+            
+            # 主動釋放記憶體
+            torch.cuda.empty_cache()
     
     except Exception as e:
         import traceback
@@ -698,4 +953,7 @@ if __name__ == "__main__":
     finally:
         # Cleanup
         if torch.distributed.is_initialized():
-            destroy_process_group()
+            try:
+                destroy_process_group()
+            except:
+                print("Failed to destroy process group")
