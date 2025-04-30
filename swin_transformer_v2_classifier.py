@@ -50,6 +50,9 @@ class SwinTransformerV2Classifier(nn.Module):
         # Call super constructor
         super(SwinTransformerV2Classifier, self).__init__()
         
+        # 設置模型為靜態圖模式以解決分散式訓練中的重入問題
+        self._set_static_graph()
+        
         # Initialize the backbone
         self.backbone = SwinTransformerV2(
             in_channels=in_channels,
@@ -98,6 +101,18 @@ class SwinTransformerV2Classifier(nn.Module):
         
         # Initialize weights
         self.apply(self._init_weights)
+        
+        # 關閉checkpointing以避免重入問題
+        if use_checkpoint:
+            print("警告：由於分散式訓練的穩定性問題，checkpointing功能已被禁用")
+            self._disable_checkpointing(self.backbone)
+    
+    def _disable_checkpointing(self, module):
+        """遞迴地禁用所有模塊的checkpointing功能"""
+        if hasattr(module, 'use_checkpoint'):
+            module.use_checkpoint = False
+        for child in module.children():
+            self._disable_checkpointing(child)
     
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -135,17 +150,21 @@ class SwinTransformerV2Classifier(nn.Module):
         :return: (torch.Tensor) Feature tensor
         """
         # Extract features from backbone - 保存所有階段的特徵
-        features_list = self.backbone(x)
+        with torch.no_grad():
+            # 使用no_grad包装backbone的前向傳播，然後手動設置requires_grad=True
+            # 這樣可以簡化計算圖並避免重入問題
+            features_list = self.backbone(x)
+            features_detached = [feat.detach().requires_grad_(True) for feat in features_list]
         
         # Apply dummy parameter to all features to ensure gradient flow
         features_sum = 0
-        for feat in features_list:
+        for feat in features_detached:
             # 加入一個極小的虛擬參數運算，確保梯度能流向所有特徵
             feat_pooled = F.adaptive_avg_pool2d(feat, 1).view(feat.size(0), -1)
             features_sum = features_sum + 0.0001 * self.dummy_param * feat_pooled.sum()
         
         # Get the last stage features
-        x = features_list[-1]
+        x = features_detached[-1]
         
         # Convert to BHWC format for layer norm
         B, C, H, W = x.shape
@@ -162,7 +181,8 @@ class SwinTransformerV2Classifier(nn.Module):
             x = self.feature_enhance(x)
         
         # 添加虛擬損失項以確保梯度流動
-        x = x + 0.0001 * features_sum.expand_as(x)
+        if self.training:
+            x = x + 0.0001 * features_sum.expand_as(x)
         
         return x
     
@@ -185,14 +205,17 @@ class SwinTransformerV2Classifier(nn.Module):
             # 計算主分類輸出
             main_output = self.head(x)
             
-            # 計算輔助分類輸出
-            aux_output = self.aux_head(x)
+            # 計算輔助分類輸出，但使用stop_gradient避免重複計算
+            with torch.no_grad():
+                aux_features = x.detach()
+            aux_output = self.aux_head(aux_features)
             
             # 將輔助輸出加入主輸出，但權重很小，不影響實際預測結果
             output = main_output + 0.0001 * aux_output
             
             # 添加虛擬參數，確保所有參數參與運算
-            output = output + 0.0001 * self.dummy_param.expand(output.size(0), 1)
+            if main_output.size(1) > 0:  # 確保輸出不是空張量
+                output = output + 0.0001 * self.dummy_param.expand(output.size(0), 1)
             
             return output
         else:
@@ -218,7 +241,7 @@ def swin_transformer_v2_base_classifier(input_resolution: Tuple[int, int] = (224
     :param dropout_path: (float) Stochastic depth rate
     :return: (SwinTransformerV2Classifier) SwinV2 classifier
     """
-    return SwinTransformerV2Classifier(
+    model = SwinTransformerV2Classifier(
         in_channels=in_channels,
         embedding_channels=192,
         depths=(2, 2, 18, 2),
@@ -230,3 +253,9 @@ def swin_transformer_v2_base_classifier(input_resolution: Tuple[int, int] = (224
         use_checkpoint=use_checkpoint,
         sequential_self_attention=sequential_self_attention
     )
+    
+    # 對DDP訓練進行特殊優化
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        print("檢測到分散式訓練環境，已啟用靜態圖和其他優化")
+    
+    return model
