@@ -90,6 +90,12 @@ class SwinTransformerV2Classifier(nn.Module):
         # Classification head (global average pooling + linear)
         self.head = nn.Linear(last_stage_channels, num_classes)
         
+        # 添加輔助頭以確保所有參數參與梯度計算
+        self.aux_head = nn.Linear(last_stage_channels, num_classes)
+        
+        # 創建一個虛擬參數，用於在訓練期間強制所有層參與梯度計算
+        self.dummy_param = nn.Parameter(torch.ones(1, requires_grad=True))
+        
         # Initialize weights
         self.apply(self._init_weights)
     
@@ -114,17 +120,32 @@ class SwinTransformerV2Classifier(nn.Module):
         """
         self.backbone.update_resolution(new_window_size=new_window_size, new_input_resolution=new_input_resolution)
     
+    def get_intermediate_features(self, x: torch.Tensor) -> List[torch.Tensor]:
+        """
+        獲取所有中間特徵
+        :param x: (torch.Tensor) 輸入張量
+        :return: (List[torch.Tensor]) 中間特徵列表
+        """
+        return self.backbone(x)
+    
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass to extract features
         :param x: (torch.Tensor) Input tensor of shape [B, C, H, W]
         :return: (torch.Tensor) Feature tensor
         """
-        # Extract features from backbone
-        features = self.backbone(x)
+        # Extract features from backbone - 保存所有階段的特徵
+        features_list = self.backbone(x)
+        
+        # Apply dummy parameter to all features to ensure gradient flow
+        features_sum = 0
+        for feat in features_list:
+            # 加入一個極小的虛擬參數運算，確保梯度能流向所有特徵
+            feat_pooled = F.adaptive_avg_pool2d(feat, 1).view(feat.size(0), -1)
+            features_sum = features_sum + 0.0001 * self.dummy_param * feat_pooled.sum()
         
         # Get the last stage features
-        x = features[-1]
+        x = features_list[-1]
         
         # Convert to BHWC format for layer norm
         B, C, H, W = x.shape
@@ -139,6 +160,9 @@ class SwinTransformerV2Classifier(nn.Module):
         # 增強特徵表示
         if hasattr(self, 'feature_enhance'):
             x = self.feature_enhance(x)
+        
+        # 添加虛擬損失項以確保梯度流動
+        x = x + 0.0001 * features_sum.expand_as(x)
         
         return x
     
@@ -155,11 +179,25 @@ class SwinTransformerV2Classifier(nn.Module):
         # This helps stabilize the feature magnitude during training
         if hasattr(self, 'feature_scaling') and self.training:
             x = self.feature_scaling(x)
-
-        # Classification head
-        x = self.head(x)
-        
-        return x
+            
+        # 使用輔助頭計算額外的輸出，確保梯度流動
+        if self.training:
+            # 計算主分類輸出
+            main_output = self.head(x)
+            
+            # 計算輔助分類輸出
+            aux_output = self.aux_head(x)
+            
+            # 將輔助輸出加入主輸出，但權重很小，不影響實際預測結果
+            output = main_output + 0.0001 * aux_output
+            
+            # 添加虛擬參數，確保所有參數參與運算
+            output = output + 0.0001 * self.dummy_param.expand(output.size(0), 1)
+            
+            return output
+        else:
+            # 推理階段只使用主分類頭
+            return self.head(x)
 
 
 def swin_transformer_v2_base_classifier(input_resolution: Tuple[int, int] = (224, 224),
