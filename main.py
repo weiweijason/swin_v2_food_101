@@ -768,12 +768,12 @@ if __name__ == "__main__":
         # 跳過載入預訓練權重，從頭開始訓練
         logger.info("從頭開始訓練模型，不使用預訓練權重")
         
-        # 使用 DDP 包裝模型，但進行更安全的配置
+        # 使用 DDP 包裝模型
         model = nn.parallel.DistributedDataParallel(
             model, 
             device_ids=[local_rank],
-            find_unused_parameters=False,  # 關閉該選項，減少通信開銷
-            broadcast_buffers=False  # 關閉緩衝區廣播以減少通信量
+            find_unused_parameters=True,  # 啟用未使用參數檢測以解決DDP訓練問題
+            broadcast_buffers=False  # 保持關閉緩衝區廣播以減少通信量
         )
         
         # 禁用可能與分散式訓練衝突的優化選項
