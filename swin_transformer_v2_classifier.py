@@ -50,8 +50,8 @@ class SwinTransformerV2Classifier(nn.Module):
         # Call super constructor
         super(SwinTransformerV2Classifier, self).__init__()
         
-        # 設置模型為靜態圖模式以解決分散式訓練中的重入問題
-        self._set_static_graph()
+        # 嘗試設置靜態圖模式以解決分散式訓練中的重入問題（使用版本兼容的方式）
+        self.enable_static_graph()
         
         # Initialize the backbone
         self.backbone = SwinTransformerV2(
@@ -106,6 +106,27 @@ class SwinTransformerV2Classifier(nn.Module):
         if use_checkpoint:
             print("警告：由於分散式訓練的穩定性問題，checkpointing功能已被禁用")
             self._disable_checkpointing(self.backbone)
+    
+    def enable_static_graph(self):
+        """使用版本兼容的方式啟用靜態圖模式"""
+        # 嘗試使用新版本的 _set_static_graph() 方法
+        if hasattr(nn.Module, '_set_static_graph'):
+            try:
+                self._set_static_graph()  # 新版本 PyTorch
+                print("使用 _set_static_graph() 啟用靜態圖")
+            except Exception as e:
+                print(f"啟用靜態圖時發生錯誤: {e}")
+                pass
+        # 嘗試使用舊版本的 set_static_graph() 方法
+        elif hasattr(torch._C, '_jit_set_graph_executor_optimize'):
+            try:
+                torch._C._jit_set_graph_executor_optimize(False)
+                print("使用 _jit_set_graph_executor_optimize() 禁用圖優化")
+            except Exception as e:
+                print(f"禁用圖優化時發生錯誤: {e}")
+                pass
+        else:
+            print("警告：無法啟用靜態圖模式，可能會影響分散式訓練的穩定性")
     
     def _disable_checkpointing(self, module):
         """遞迴地禁用所有模塊的checkpointing功能"""
@@ -215,7 +236,10 @@ class SwinTransformerV2Classifier(nn.Module):
             
             # 添加虛擬參數，確保所有參數參與運算
             if main_output.size(1) > 0:  # 確保輸出不是空張量
-                output = output + 0.0001 * self.dummy_param.expand(output.size(0), 1)
+                dummy_expand = self.dummy_param.view(1, 1).expand(output.size(0), 1)
+                if output.size(1) > 1:
+                    dummy_expand = dummy_expand.expand(output.size(0), output.size(1))
+                output = output + 0.0001 * dummy_expand
             
             return output
         else:
@@ -250,12 +274,11 @@ def swin_transformer_v2_base_classifier(input_resolution: Tuple[int, int] = (224
         window_size=window_size,
         dropout_path=dropout_path,  # 增加 stochastic depth 參數
         num_classes=num_classes,
-        use_checkpoint=use_checkpoint,
+        use_checkpoint=False,  # 強制禁用checkpointing以避免分散式訓練問題
         sequential_self_attention=sequential_self_attention
     )
     
-    # 對DDP訓練進行特殊優化
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        print("檢測到分散式訓練環境，已啟用靜態圖和其他優化")
+    # 打印模型狀態
+    print(f"SwinV2 Classifier 初始化完成: 圖像尺寸={input_resolution}, 窗口大小={window_size}, 類別數={num_classes}")
     
     return model
