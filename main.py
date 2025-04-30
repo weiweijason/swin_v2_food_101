@@ -577,7 +577,7 @@ if __name__ == "__main__":
         # 更新參數設置 - 降低批次大小以減少通信負擔
         BATCH_SIZE = 32  # 從32減小到16，減少通信負擔
         IMAGE_SIZE = 256  # 保持不變
-        WINDOW_SIZE = 16  # 確保與window_size參數匹配
+        WINDOW_SIZE = 8  # 確保與window_size參數匹配
         NUM_EPOCHS = 30    
         IMAGE_ROOT = "food-101/images"
         TRAIN_FILE = "food-101/meta/train.txt"
@@ -757,7 +757,7 @@ if __name__ == "__main__":
         # 初始化 SwinV2 模型，使用容錯性更高的配置
         model = swin_transformer_v2_base_classifier(
             input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
-            window_size=6,  # 保持窗口大小與圖像尺寸兼容
+            window_size=8,  # 保持窗口大小與圖像尺寸兼容
             num_classes=len(LABELS),
             use_checkpoint=True,  # 使用checkpoint可以減少內存使用但增加計算
             dropout_path=0.1  # 保持較低的dropout以提高穩定性
