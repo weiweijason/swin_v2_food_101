@@ -555,7 +555,7 @@ if __name__ == "__main__":
         dist.init_process_group(
             backend='nccl',
             init_method='env://',
-            timeout=datetime.timedelta(seconds=3600)  # 設置為1小時
+            # timeout=datetime.timedelta(seconds=3600)  # 設置為1小時
         )
 
         print(f"Process initialized with rank {local_rank}/{world_size}")
