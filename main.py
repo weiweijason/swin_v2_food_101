@@ -742,24 +742,24 @@ if __name__ == "__main__":
         train_sampler = DistributedSampler(train_dataset)
         test_sampler = DistributedSampler(test_dataset)
 
-        # 更新數據加載器配置 - 修復連接問題
+        # 更新數據加載器配置 - 優化以更充分利用 GPU 記憶體
         train_loader = DataLoader(
             train_dataset, 
             batch_size=BATCH_SIZE, 
             sampler=train_sampler, 
-            num_workers=16,  # 減少工作進程數量，避免連接拒絕錯誤
+            num_workers=4,  # 減少工作進程數量，避免 CPU 記憶體壓力
             pin_memory=True, 
             drop_last=True,
-            prefetch_factor=2,  # 降低預取因子以減少資源需求
+            prefetch_factor=3,  # 提高預取因子以減少 GPU 等待時間
             persistent_workers=True
         )
         test_loader = DataLoader(
             test_dataset, 
-            batch_size=BATCH_SIZE // 2, 
+            batch_size=BATCH_SIZE, 
             sampler=test_sampler, 
-            num_workers=16,  # 減少工作進程數量
+            num_workers=4,
             pin_memory=True,
-            prefetch_factor=2,
+            prefetch_factor=3,
             persistent_workers=True
         )
 
@@ -813,11 +813,12 @@ if __name__ == "__main__":
             t_in_epochs=True,
         )
 
-        # 初始化混合精度訓練的scaler，降低增長率以提高穩定性
+        # 初始化混合精度訓練的scaler，優化設定以更好利用 GPU 記憶體
         scaler = GradScaler(
-            growth_factor=1.5,  # 降低從2.0到1.5
+            init_scale=2**16,  # 使用更高的初始scale值
+            growth_factor=2.0,  # 將值提高回預設值
             backoff_factor=0.5,
-            growth_interval=100  # 增加增長間隔
+            growth_interval=100
         )
         
         # 在主進程上初始化TensorBoard writer
@@ -872,11 +873,12 @@ if __name__ == "__main__":
             except:
                 logger.warning("Failed to synchronize before training epoch")
             
-            # 在訓練時使用 mixup_fn
+            # 在訓練時使用 mixup_fn 和較小的梯度累積步數
             try:
                 train_acc, train_loss = train_epoch_amp(
                     model, train_loader, optimizer, scheduler, criterion, 
-                    device, scaler, epoch, logger, mixup_fn=mixup_fn
+                    device, scaler, epoch, logger, mixup_fn=mixup_fn,
+                    gradient_accumulation_steps=2  # 使用較小的梯度累積步數，以更好地利用 GPU 資源
                 )
             except Exception as e:
                 logger.error(f"Error during training epoch: {e}")
