@@ -587,7 +587,7 @@ if __name__ == "__main__":
         BATCH_SIZE = 64  # 從32增加到64，充分利用 GPU 記憶體
         IMAGE_SIZE = 256  # 保持不變
         WINDOW_SIZE = 8  # 確保與window_size參數匹配
-        NUM_EPOCHS = 30    
+        NUM_EPOCHS = 50    
         IMAGE_ROOT = "food-101/images"
         TRAIN_FILE = "food-101/meta/train.txt"
         TEST_FILE = "food-101/meta/test.txt"
@@ -747,7 +747,7 @@ if __name__ == "__main__":
             train_dataset, 
             batch_size=BATCH_SIZE, 
             sampler=train_sampler, 
-            num_workers=4,  # 減少工作進程數量，避免 CPU 記憶體壓力
+            num_workers=16,  # 減少工作進程數量，避免 CPU 記憶體壓力
             pin_memory=True, 
             drop_last=True,
             prefetch_factor=3,  # 提高預取因子以減少 GPU 等待時間
@@ -757,7 +757,7 @@ if __name__ == "__main__":
             test_dataset, 
             batch_size=BATCH_SIZE, 
             sampler=test_sampler, 
-            num_workers=4,
+            num_workers=16,
             pin_memory=True,
             prefetch_factor=3,
             persistent_workers=True
