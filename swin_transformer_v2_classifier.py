@@ -53,12 +53,12 @@ class SwinTransformerV2Classifier(nn.Module):
         
         # 建立主幹模型
         self.backbone = SwinTransformerV2(
-            img_size=input_resolution,
+            input_resolution=input_resolution,
             window_size=window_size,
             drop_path_rate=dropout_path,
             depths=depths,
             embed_dim=embed_dim,
-            num_heads=num_heads,
+            number_of_heads=num_heads,
             use_checkpoint=use_checkpoint
         )
         
