@@ -51,6 +51,18 @@ class SwinTransformerV2Classifier(nn.Module):
         self.depths = depths
         self.num_features = embed_dim * 8  # 2^3
         
+        # 添加 dummy_param 參數，用於確保梯度流動
+        self.dummy_param = nn.Parameter(torch.ones(1))
+        
+        # 添加輔助分類頭，用於訓練階段
+        self.aux_head = nn.Sequential(
+            nn.Linear(self.num_features, self.num_features // 2),
+            nn.BatchNorm1d(self.num_features // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(self.num_features // 2, num_classes)
+        )
+        
         # 建立主幹模型
         self.backbone = SwinTransformerV2(
             in_channels=3,  # 添加默認的输入通道數（RGB圖像）
