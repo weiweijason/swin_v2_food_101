@@ -685,33 +685,31 @@ class SwinTransformerStage(nn.Module):
     """
 
     def __init__(self,
-                 in_channels: int,
+                 dim: int,
                  depth: int,
                  downscale: bool,
                  input_resolution: Tuple[int, int],
-                 number_of_heads: int,
+                 num_heads: int,
                  window_size: int = 7,
-                 ff_feature_ratio: int = 4,
-                 dropout: float = 0.0,
-                 dropout_attention: float = 0.0,
+                 mlp_ratio: int = 4,
+                 drop: float = 0.0,
+                 attn_drop: float = 0.0,
                  dropout_path: Union[List[float], float] = 0.0,
                  use_checkpoint: bool = False,
-                 sequential_self_attention: bool = False,
                  use_deformable_block: bool = False) -> None:
         """
         Constructor method
-        :param in_channels: (int) Number of input channels
+        :param dim: (int) Number of input channels
         :param depth: (int) Depth of the stage (number of layers)
         :param downscale: (bool) If true input is downsampled (see Fig. 3 or V1 paper)
         :param input_resolution: (Tuple[int, int]) Input resolution
-        :param number_of_heads: (int) Number of attention heads to be utilized
+        :param num_heads: (int) Number of attention heads to be utilized
         :param window_size: (int) Window size to be utilized
-        :param ff_feature_ratio: (int) Ratio of the hidden dimension in the FFN to the input channels
-        :param dropout: (float) Dropout in input mapping
-        :param dropout_attention: (float) Dropout rate of attention map
+        :param mlp_ratio: (int) Ratio of the hidden dimension in the FFN to the input channels
+        :param drop: (float) Dropout in input mapping
+        :param attn_drop: (float) Dropout rate of attention map
         :param dropout_path: (float) Dropout in main path
         :param use_checkpoint: (bool) If true checkpointing is utilized
-        :param sequential_self_attention: (bool) If true sequential self-attention is performed
         :param use_deformable_block: (bool) If true deformable block is used
         """
         # Call super constructor
@@ -720,25 +718,24 @@ class SwinTransformerStage(nn.Module):
         self.use_checkpoint: bool = use_checkpoint
         self.downscale: bool = downscale
         # Init downsampling
-        self.downsample: nn.Module = PatchMerging(in_channels=in_channels) if downscale else nn.Identity()
+        self.downsample: nn.Module = PatchMerging(in_channels=dim) if downscale else nn.Identity()
         # Update resolution and channels
         self.input_resolution: Tuple[int, int] = (input_resolution[0] // 2, input_resolution[1] // 2) \
             if downscale else input_resolution
-        in_channels = in_channels * 2 if downscale else in_channels
+        dim = dim * 2 if downscale else dim
         # Get block
         block = DeformableSwinTransformerBlock if use_deformable_block else SwinTransformerBlock
         # Init blocks
         self.blocks: nn.ModuleList = nn.ModuleList([
-            block(in_channels=in_channels,
+            block(dim=dim,  # 修改參數名稱：in_channels -> dim
                   input_resolution=self.input_resolution,
-                  number_of_heads=number_of_heads,
+                  num_heads=num_heads,  # 修改參數名稱：number_of_heads -> num_heads
                   window_size=window_size,
                   shift_size=0 if ((index % 2) == 0) else window_size // 2,
-                  ff_feature_ratio=ff_feature_ratio,
-                  dropout=dropout,
-                  dropout_attention=dropout_attention,
-                  dropout_path=dropout_path[index] if isinstance(dropout_path, list) else dropout_path,
-                  sequential_self_attention=sequential_self_attention)
+                  mlp_ratio=mlp_ratio,  # 修改參數名稱：ff_feature_ratio -> mlp_ratio
+                  drop=drop,  # 修改參數名稱：dropout -> drop
+                  attn_drop=attn_drop,  # 修改參數名稱：dropout_attention -> attn_drop
+                  drop_path=dropout_path[index] if isinstance(dropout_path, list) else dropout_path)
             for index in range(depth)])
 
     def update_resolution(self, new_window_size: int, new_input_resolution: Tuple[int, int]) -> None:
