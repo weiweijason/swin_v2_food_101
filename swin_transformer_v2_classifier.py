@@ -169,21 +169,43 @@ class SwinTransformerV2Classifier(nn.Module):
         features_sum = 0
         for feat in features_detached:
             # 加入一個極小的虛擬參數運算，確保梯度能流向所有特徵
-            feat_pooled = F.adaptive_avg_pool2d(feat, 1).view(feat.size(0), -1)
+            # 檢查 feat 的維度，確保可以使用 adaptive_avg_pool2d
+            if len(feat.shape) == 4:  # [B, C, H, W] 格式
+                feat_pooled = F.adaptive_avg_pool2d(feat, 1).view(feat.size(0), -1)
+            else:  # [B, L, C] 格式
+                # 對於序列格式，直接在 L 維度上平均
+                feat_pooled = feat.mean(dim=1)
+                
             features_sum = features_sum + 0.0001 * self.dummy_param * feat_pooled.sum()
         
         # Get the last stage features
         x = features_detached[-1]
         
-        # Convert to BHWC format for layer norm
-        B, C, H, W = x.shape
-        x = x.permute(0, 2, 3, 1)  # B, H, W, C
-        
-        # Apply layer norm
-        x = self.norm(x)
-        
-        # Global average pooling
-        x = x.reshape(B, H * W, C).mean(dim=1)  # B, C
+        # 檢查 x 的維度，並進行相應的處理
+        if len(x.shape) == 4:  # [B, C, H, W] 格式
+            B, C, H, W = x.shape
+            # Convert to BHWC format for layer norm
+            x = x.permute(0, 2, 3, 1)  # B, H, W, C
+            
+            # Apply batch norm (需要將 [B, H, W, C] 轉換為 [B, C, H, W])
+            x = x.permute(0, 3, 1, 2)  # 轉回 [B, C, H, W]
+            x = self.norm(x)
+            
+            # Global average pooling
+            x = self.avgpool(x).view(B, C)  # B, C
+            
+        else:  # [B, L, C] 格式
+            B, L, C = x.shape
+            
+            # 創建一個適合 3D 張量的標準化層
+            if not hasattr(self, 'norm_3d'):
+                self.norm_3d = nn.LayerNorm(C).to(x.device)
+                
+            # 應用層標準化
+            x = self.norm_3d(x)
+            
+            # 全局平均池化
+            x = x.mean(dim=1)  # [B, C]
         
         # 增強特徵表示
         if hasattr(self, 'feature_enhance'):
