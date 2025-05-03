@@ -779,10 +779,7 @@ if __name__ == "__main__":
             window_size=WINDOW_SIZE,  # 保持窗口大小與圖像尺寸兼容
             num_classes=len(LABELS),
             use_checkpoint=True,  # 使用checkpoint可以減少內存使用但增加計算
-            dropout_path=0.2,  # 增加dropout以減少過擬合
-            depths=[2, 2, 6, 2],  # 減少模型深度以便從頭訓練更有效 
-            embed_dim=64,  # 減少基礎嵌入維度
-            num_heads=[2, 4, 8, 16]  # 調整注意力頭數
+            dropout_path=0.2  # 增加dropout以減少過擬合
         )
         
         model = model.to(device)
