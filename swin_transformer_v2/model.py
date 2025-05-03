@@ -2,6 +2,7 @@ from typing import Tuple, List
 
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint as checkpoint
 
 from swin_transformer_v2.model_parts import PatchEmbedding, SwinTransformerStage
 
