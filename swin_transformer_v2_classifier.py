@@ -233,24 +233,23 @@ def swin_transformer_v2_base_classifier(input_resolution: Tuple[int, int] = (224
     Creates a Swin Transformer V2 Base model for classification
     :param input_resolution: (Tuple[int, int]) Input resolution
     :param window_size: (int) Window size
-    :param in_channels: (int) Number of input channels
+    :param in_channels: (int) Number of input channels (只用於文檔，實際未使用)
     :param num_classes: (int) Number of classes
     :param use_checkpoint: (bool) Use checkpointing
-    :param sequential_self_attention: (bool) Use sequential self-attention
+    :param sequential_self_attention: (bool) Use sequential self-attention (只用於文檔，實際未使用)
     :param dropout_path: (float) Stochastic depth rate
     :return: (SwinTransformerV2Classifier) SwinV2 classifier
     """
     model = SwinTransformerV2Classifier(
-        in_channels=in_channels,
-        embedding_channels=192,
-        depths=(2, 2, 18, 2),
         input_resolution=input_resolution,
-        number_of_heads=(6, 12, 24, 48),
         window_size=window_size,
-        dropout_path=dropout_path,  # 增加 stochastic depth 參數
         num_classes=num_classes,
-        use_checkpoint=False,  # 強制禁用checkpointing以避免分散式訓練問題
-        sequential_self_attention=sequential_self_attention
+        depths=(2, 2, 18, 2),
+        embed_dim=96,
+        num_heads=[3, 6, 12, 24],
+        dropout_path=dropout_path,
+        use_checkpoint=use_checkpoint,
+        drop_rate=0.1
     )
     
     # 打印模型狀態
