@@ -53,6 +53,7 @@ class SwinTransformerV2Classifier(nn.Module):
         
         # 建立主幹模型
         self.backbone = SwinTransformerV2(
+            in_channels=3,  # 添加默認的输入通道數（RGB圖像）
             input_resolution=input_resolution,
             window_size=window_size,
             dropout_path=dropout_path,
