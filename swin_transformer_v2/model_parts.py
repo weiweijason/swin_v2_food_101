@@ -377,170 +377,107 @@ class WindowMultiHeadAttention(nn.Module):
 
 class SwinTransformerBlock(nn.Module):
     """
-    This class implements the Swin transformer block.
+    實現 Swin Transformer 區塊，包含窗口自注意力和 FFN
     """
-
-    def __init__(self,
-                 in_channels: int,
-                 input_resolution: Tuple[int, int],
-                 number_of_heads: int,
-                 window_size: int = 7,
-                 shift_size: int = 0,
-                 ff_feature_ratio: int = 4,
-                 dropout: float = 0.0,
-                 dropout_attention: float = 0.0,
-                 dropout_path: float = 0.0,
-                 sequential_self_attention: bool = False) -> None:
-        """
-        Constructor method
-        :param in_channels: (int) Number of input channels
-        :param input_resolution: (Tuple[int, int]) Input resolution
-        :param number_of_heads: (int) Number of attention heads to be utilized
-        :param window_size: (int) Window size to be utilized
-        :param shift_size: (int) Shifting size to be used
-        :param ff_feature_ratio: (int) Ratio of the hidden dimension in the FFN to the input channels
-        :param dropout: (float) Dropout in input mapping
-        :param dropout_attention: (float) Dropout rate of attention map
-        :param dropout_path: (float) Dropout in main path
-        :param sequential_self_attention: (bool) If true sequential self-attention is performed
-        """
-        # Call super constructor
-        super(SwinTransformerBlock, self).__init__()
-        # Save parameters
-        self.in_channels: int = in_channels
-        self.input_resolution: Tuple[int, int] = input_resolution
-        # Catch case if resolution is smaller than the window size
-        if min(self.input_resolution) <= window_size:
-            self.window_size: int = min(self.input_resolution)
-            self.shift_size: int = 0
-            self.make_windows: bool = False
-        else:
-            self.window_size: int = window_size
-            self.shift_size: int = shift_size
-            self.make_windows: bool = True
-        # Init normalization layers
-        self.normalization_1: nn.Module = nn.LayerNorm(normalized_shape=in_channels)
-        self.normalization_2: nn.Module = nn.LayerNorm(normalized_shape=in_channels)
-        # Init window attention module
-        self.window_attention: WindowMultiHeadAttention = WindowMultiHeadAttention(
-            in_features=in_channels,
-            window_size=self.window_size,
-            number_of_heads=number_of_heads,
-            dropout_attention=dropout_attention,
-            dropout_projection=dropout,
-            sequential_self_attention=sequential_self_attention)
-        # Init dropout layer
-        self.dropout: nn.Module = DropPath(
-            drop_prob=dropout_path) if dropout_path > 0. else nn.Identity()
-        # Init feed-forward network
-        self.feed_forward_network: nn.Module = FeedForward(in_features=in_channels,
-                                                           hidden_features=int(in_channels * ff_feature_ratio),
-                                                           dropout=dropout,
-                                                           out_features=in_channels)
-        # Make attention mask
-        self.__make_attention_mask()
-
-    def __make_attention_mask(self) -> None:
-        """
-        Method generates the attention mask used in shift case
-        """
-        # Make masks for shift case
-        if self.shift_size > 0:
-            height, width = self.input_resolution  # type: int, int
-            mask: torch.Tensor = torch.zeros(height, width, device=self.window_attention.tau.device)
-            height_slices: Tuple = (slice(0, -self.window_size),
-                                    slice(-self.window_size, -self.shift_size),
-                                    slice(-self.shift_size, None))
-            width_slices: Tuple = (slice(0, -self.window_size),
-                                   slice(-self.window_size, -self.shift_size),
-                                   slice(-self.shift_size, None))
-            counter: int = 0
-            for height_slice in height_slices:
-                for width_slice in width_slices:
-                    mask[height_slice, width_slice] = counter
-                    counter += 1
-            mask_windows: torch.Tensor = unfold(mask[None, None], self.window_size)
-            mask_windows: torch.Tensor = mask_windows.reshape(-1, self.window_size * self.window_size)
-            attention_mask: Optional[torch.Tensor] = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-            attention_mask: Optional[torch.Tensor] = attention_mask.masked_fill(attention_mask != 0, float(-100.0))
-            attention_mask: Optional[torch.Tensor] = attention_mask.masked_fill(attention_mask == 0, float(0.0))
-        else:
-            attention_mask: Optional[torch.Tensor] = None
-        # Save mask
-        self.register_buffer("attention_mask", attention_mask)
-
-    def update_resolution(self,
-                          new_window_size: int,
-                          new_input_resolution: Tuple[int, int]) -> None:
-        """
-        Method updates the window size and so the pair-wise relative positions
-        :param new_window_size: (int) New window size
-        :param new_input_resolution: (Tuple[int, int]) New input resolution
-        """
-        # Update input resolution
-        self.input_resolution: Tuple[int, int] = new_input_resolution
-        # Catch case if resolution is smaller than the window size
-        if min(self.input_resolution) <= new_window_size:
-            self.window_size: int = min(self.input_resolution)
-            self.shift_size: int = 0
-            self.make_windows: bool = False
-        else:
-            self.window_size: int = new_window_size
-            self.shift_size: int = self.shift_size
-            self.make_windows: bool = True
-        # Update attention mask
-        self.__make_attention_mask()
-        # Update attention module
-        self.window_attention.update_resolution(new_window_size=new_window_size)
-
-    def forward(self,
-                input: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass
-        :param input: (torch.Tensor) Input tensor of the shape [batch size, in channels, height, width]
-        :return: (torch.Tensor) Output tensor of the shape [batch size, in channels, height, width]
-        """
-        # Save shape
-        batch_size, channels, height, width = input.shape  # type: int, int, int, int
-
-        # CHANGE 1: Apply normalization BEFORE attention (Pre-LN pattern)
-        normalized_input = self.normalization_1(input.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
-
-        # Shift input if utilized
-        if self.shift_size > 0:
-            output_shift: torch.Tensor = torch.roll(input=input, shifts=(-self.shift_size, -self.shift_size),
-                                                    dims=(-1, -2))
-        else:
-            output_shift: torch.Tensor = input
-        # Make patches
-        output_patches: torch.Tensor = unfold(input=output_shift, window_size=self.window_size) \
-            if self.make_windows else output_shift
-        # Perform window attention
-        output_attention: torch.Tensor = self.window_attention(output_patches, mask=self.attention_mask)
-        # Merge patches
-        output_merge: torch.Tensor = fold(input=output_attention, window_size=self.window_size, height=height,
-                                          width=width) if self.make_windows else output_attention
-        # Reverse shift if utilized
-        if self.shift_size > 0:
-            output_shift: torch.Tensor = torch.roll(input=output_merge, shifts=(self.shift_size, self.shift_size),
-                                                    dims=(-1, -2))
-        else:
-            output_shift: torch.Tensor = output_merge
+    
+    def __init__(self, dim, input_resolution, num_heads, window_size=7, shift_size=0,
+                 mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.dim = dim
+        self.input_resolution = input_resolution
+        self.num_heads = num_heads
+        self.window_size = window_size
+        self.shift_size = shift_size
+        self.mlp_ratio = mlp_ratio
         
-        # CHANGE 2: Skip connection with original input (not normalized input)
-        output_skip: torch.Tensor = self.dropout(output_shift) + input
-
-        # CHANGE 3: Apply normalization BEFORE feed-forward network
-        normalized_skip = self.normalization_2(output_skip.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        # 對於從頭訓練，使用 PreNorm 而非 PostNorm 可以提高穩定性
+        # 修改為 PreNorm 結構，先進行標準化再進行注意力計算
+        self.norm1 = norm_layer(dim)
         
-        # Feed forward network, normalization and skip connection
-        output_feed_forward: torch.Tensor = self.feed_forward_network(
-            output_skip.view(batch_size, channels, -1).permute(0, 2, 1)).permute(0, 2, 1)
-        output_feed_forward: torch.Tensor = output_feed_forward.view(batch_size, channels, height, width)
+        # 使用增強版本的 WindowAttention
+        self.attn = WindowAttention(
+            dim, window_size=to_2tuple(self.window_size), num_heads=num_heads,
+            qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop,
+            use_gate=True  # 添加門控機制以提高從頭訓練的效果
+        )
+        
+        # 降低 path dropout 強度以提高從頭訓練的穩定性
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        
+        # 使用修改版的FFN，加入批次歸一化以提高訓練穩定性
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, 
+                      act_layer=act_layer, drop=drop, use_bn=True)  # 增加 BatchNorm
 
-        # CHANGE 4: Skip connection with output from first MSA block
-        output: torch.Tensor = output_skip + self.dropout(output_feed_forward)
-        return output
+        # 提前計算注意力遮罩以加速訓練
+        if self.shift_size > 0:
+            # 初始化時計算注意力遮罩，避免重複計算
+            H, W = self.input_resolution
+            img_mask = torch.zeros((1, H, W, 1))
+            h_slices = (slice(0, -self.window_size),
+                        slice(-self.window_size, -self.shift_size),
+                        slice(-self.shift_size, None))
+            w_slices = (slice(0, -self.window_size),
+                        slice(-self.window_size, -self.shift_size),
+                        slice(-self.shift_size, None))
+            cnt = 0
+            for h in h_slices:
+                for w in w_slices:
+                    img_mask[:, h, w, :] = cnt
+                    cnt += 1
+            mask_windows = window_partition(img_mask, self.window_size)
+            mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
+            attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+            attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
+            self.register_buffer("attn_mask", attn_mask)
+        else:
+            self.register_buffer("attn_mask", None)
+    
+    def forward(self, x):
+        H, W = self.input_resolution
+        B, L, C = x.shape
+        assert L == H * W, "input feature has wrong size"
+        
+        shortcut = x
+        x = self.norm1(x)  # PreNorm
+        x = x.view(B, H, W, C)
+        
+        # 循環位移
+        if self.shift_size > 0:
+            shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
+        else:
+            shifted_x = x
+        
+        # 分割成不重疊的窗口
+        x_windows = window_partition(shifted_x, self.window_size)
+        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)
+        
+        # W-MSA/SW-MSA
+        attn_windows = self.attn(x_windows, mask=self.attn_mask)
+        
+        # 合併窗口
+        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
+        shifted_x = window_reverse(attn_windows, self.window_size, H, W)
+        
+        # 移回原位置
+        if self.shift_size > 0:
+            x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
+        else:
+            x = shifted_x
+        x = x.view(B, H * W, C)
+        
+        # FFN，使用 PreNorm 結構，加入 BatchNorm 增強從頭訓練的效果
+        x = shortcut + self.drop_path(x)
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        
+        # 在訓練時使用殘差縮放，增強梯度傳遞
+        if self.training:
+            # 應用殘差縮放因子，通常設為 < 1.0 以防梯度爆炸 
+            x = x * 0.9  # 殘差縮放因子
+        
+        return x
 
 
 class DeformableSwinTransformerBlock(SwinTransformerBlock):
@@ -697,6 +634,69 @@ class PatchMerging(nn.Module):
         input: torch.Tensor = input.reshape(batch_size, input.shape[1], input.shape[2], -1)
         # Normalize input
         input: torch.Tensor = self.normalization(input)
+        # Perform linear mapping
+        output: torch.Tensor = bhwc_to_bchw(self.linear_mapping(input))
+        return output
+
+
+class PatchEmbedding(nn.Module):
+    """
+    Module embeds a given image into patch embeddings.
+    """
+
+    def __init__(self,
+                 in_channels: int = 3,
+                 out_channels: int = 96,
+                 patch_size: int = 4) -> None:
+        """
+        Constructor method
+        :param in_channels: (int) Number of input channels
+        :param out_channels: (int) Number of output channels
+        :param patch_size: (int) Patch size to be utilized
+        :param image_size: (int) Image size to be used
+        """
+        # Call super constructor
+        super(PatchEmbedding, self).__init__()
+        # Save parameters
+        self.out_channels: int = out_channels
+        # Init linear embedding as a convolution
+        self.linear_embedding: nn.Module = nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
+                                                     kernel_size=(patch_size, patch_size),
+                                                     stride=(patch_size, patch_size))
+        # Init layer normalization
+        self.normalization: nn.Module = nn.LayerNorm(normalized_shape=out_channels)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass transforms a given batch of images into a patch embedding
+        :param input: (torch.Tensor) Input images of the shape [batch size, in channels, height, width]
+        :return: (torch.Tensor) Patch embedding of the shape [batch size, patches + 1, out channels]
+        """
+        # Perform linear embedding
+        embedding: torch.Tensor = self.linear_embedding(input)
+        # Perform normalization
+        embedding: torch.Tensor = bhwc_to_bchw(self.normalization(bchw_to_bhwc(embedding)))
+        return embedding
+
+
+class SwinTransformerStage(nn.Module):
+    """
+    This class implements a stage of the Swin transformer including multiple layers.
+    """
+
+    def __init__(self,
+                 in_channels: int,
+                 depth: int,
+                 downscale: bool,
+                 input_resolution: Tuple[int, int],
+                 number_of_heads: int,
+                 window_size: int = 7,
+                 ff_feature_ratio: int = 4,
+                 dropout: float = 0.0,
+                 dropout_attention: float = 0.0,
+                 dropout_path: Union[List[float], float] = 0.0,
+                 use_checkpoint: bool = False,
+                 sequential_self_attention: bool = False,
         # Perform linear mapping
         output: torch.Tensor = bhwc_to_bchw(self.linear_mapping(input))
         return output

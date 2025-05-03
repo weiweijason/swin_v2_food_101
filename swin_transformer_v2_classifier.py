@@ -13,99 +13,87 @@ class SwinTransformerV2Classifier(nn.Module):
     This class implements the Swin Transformer V2 with a classification head.
     """
 
-    def __init__(self,
-                 in_channels: int = 3,
-                 embedding_channels: int = 128,
-                 depths: Tuple[int, ...] = (2, 2, 18, 2),
-                 input_resolution: Tuple[int, int] = (224, 224),
-                 number_of_heads: Tuple[int, ...] = (4, 8, 16, 32),
-                 window_size: int = 7,
-                 patch_size: int = 4,
-                 ff_feature_ratio: int = 4,
-                 dropout: float = 0.0,
-                 dropout_attention: float = 0.0,
-                 dropout_path: float = 0.2,
-                 use_checkpoint: bool = False,
-                 sequential_self_attention: bool = False,
-                 use_deformable_block: bool = False,
-                 num_classes: int = 1000) -> None:
+    def __init__(self, input_resolution, window_size, num_classes, drop_rate=0.0,
+                 dropout_path=0.0, depths=[2, 2, 6, 2], embed_dim=64, num_heads=[2, 4, 8, 16],
+                 use_checkpoint=False):
         """
-        Constructor method
-        :param in_channels: (int) Number of input channels
-        :param embedding_channels: (int) Number of embedding channels
-        :param depths: (Tuple[int, ...]) Depth of each stage
-        :param input_resolution: (Tuple[int, int]) Input resolution
-        :param number_of_heads: (Tuple[int, ...]) Number of attention heads in each stage
-        :param window_size: (int) Window size
-        :param patch_size: (int) Patch size
-        :param ff_feature_ratio: (int) Feed-forward feature ratio
-        :param dropout: (float) Dropout rate
-        :param dropout_attention: (float) Attention dropout rate
-        :param dropout_path: (float) Path dropout rate (Stochastic Depth)
-        :param use_checkpoint: (bool) Use checkpointing
-        :param sequential_self_attention: (bool) Use sequential self-attention
-        :param use_deformable_block: (bool) Use deformable blocks
-        :param num_classes: (int) Number of classes for classification
+        初始化 SwinV2 分類器模型
+        
+        參數:
+        ------
+        input_resolution : tuple(int, int)
+            輸入圖像分辨率
+        window_size : int
+            窗口注意力的窗口大小
+        num_classes : int
+            分類類別數量
+        drop_rate : float
+            丟棄率
+        dropout_path : float
+            路徑丟棄率
+        depths : list[int]
+            每層的塊數
+        embed_dim : int
+            初始嵌入維度
+        num_heads : list[int]
+            每層的注意力頭數
+        use_checkpoint : bool
+            是否使用梯度檢查點
         """
-        # Call super constructor
-        super(SwinTransformerV2Classifier, self).__init__()
+        super().__init__()
         
-        # 嘗試設置靜態圖模式以解決分散式訓練中的重入問題（使用版本兼容的方式）
-        self.enable_static_graph()
-        
-        # Initialize the backbone
-        self.backbone = SwinTransformerV2(
-            in_channels=in_channels,
-            embedding_channels=embedding_channels,
-            depths=depths,
-            input_resolution=input_resolution,
-            number_of_heads=number_of_heads,
-            window_size=window_size,
-            patch_size=patch_size,
-            ff_feature_ratio=ff_feature_ratio,
-            dropout=dropout,
-            dropout_attention=dropout_attention,
-            dropout_path=dropout_path,
-            use_checkpoint=use_checkpoint,
-            sequential_self_attention=sequential_self_attention,
-            use_deformable_block=use_deformable_block
-        )
-        
-        # Calculate the output channels from the last stage
-        last_stage_channels = embedding_channels * 2 ** (len(depths) - 1)
-        
-        # Layer normalization
-        self.norm = nn.LayerNorm(last_stage_channels)
-        
-        # 增加特徵增強層，提高特徵提取能力
-        self.feature_enhance = nn.Sequential(
-            nn.Linear(last_stage_channels, last_stage_channels),
-            nn.GELU(),
-            nn.Dropout(0.1),
-        )
-        
-        # 使用更穩定的特徵縮放，避免NaN問題
-        self.feature_scaling = nn.Sequential(
-            nn.LayerNorm(last_stage_channels, elementwise_affine=False),  # 使用LayerNorm替代BatchNorm1d提高穩定性
-            nn.Dropout(0.1)  # 添加額外的dropout以防止過擬合
-        )
-        
-        # Classification head (global average pooling + linear)
-        self.head = nn.Linear(last_stage_channels, num_classes)
-        
-        # 添加輔助頭以確保所有參數參與梯度計算
-        self.aux_head = nn.Linear(last_stage_channels, num_classes)
-        
-        # 創建一個虛擬參數，用於在訓練期間強制所有層參與梯度計算
-        self.dummy_param = nn.Parameter(torch.ones(1, requires_grad=True))
-        
-        # Initialize weights
+        # 增加針對從頭訓練的特殊初始化
         self.apply(self._init_weights)
         
-        # 關閉checkpointing以避免重入問題
-        if use_checkpoint:
-            print("警告：由於分散式訓練的穩定性問題，checkpointing功能已被禁用")
-            self._disable_checkpointing(self.backbone)
+        # 保存初始化參數
+        self.input_resolution = input_resolution
+        self.num_classes = num_classes
+        self.depths = depths
+        self.num_features = embed_dim * 8  # 2^3
+        
+        # 建立主幹模型
+        self.backbone = SwinTransformerV2(
+            img_size=input_resolution,
+            window_size=window_size,
+            drop_path_rate=dropout_path,
+            depths=depths,
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            use_checkpoint=use_checkpoint
+        )
+        
+        # 分類頭初始化加入批次歸一化以提高穩定性
+        self.norm = nn.BatchNorm2d(self.num_features)  # 使用BN代替LayerNorm，提高從頭訓練穩定性
+        self.avgpool = nn.AdaptiveAvgPool2d(1)
+        self.flat = nn.Flatten(1)
+        self.drop = nn.Dropout(drop_rate)
+        # 分類頭使用兩層MLP，引入非線性並降低過擬合
+        self.head = nn.Sequential(
+            nn.Linear(self.num_features, self.num_features // 2),
+            nn.BatchNorm1d(self.num_features // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),  # 增加更強的Dropout
+            nn.Linear(self.num_features // 2, num_classes)
+        )
+    
+    def _init_weights(self, m):
+        """為從頭訓練設計的權重初始化方法"""
+        if isinstance(m, nn.Linear):
+            # 分類頭使用較小的初始化範圍
+            nn.init.trunc_normal_(m.weight, std=0.01)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+        elif isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm1d):
+            nn.init.constant_(m.weight, 1)
+            nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.Conv2d):
+            # 卷積層使用kaiming初始化
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
     
     def enable_static_graph(self):
         """使用版本兼容的方式啟用靜態圖模式"""
@@ -134,19 +122,6 @@ class SwinTransformerV2Classifier(nn.Module):
             module.use_checkpoint = False
         for child in module.children():
             self._disable_checkpointing(child)
-    
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            # 使用更穩定的初始化方法
-            nn.init.trunc_normal_(m.weight, std=.02)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            # 檢查 bias 和 weight 是否存在，避免 NoneType 錯誤
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-            if m.weight is not None:
-                nn.init.constant_(m.weight, 1.0)
     
     def update_resolution(self, new_window_size: int, new_input_resolution: Tuple[int, int]) -> None:
         """

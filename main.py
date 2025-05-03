@@ -103,7 +103,7 @@ def check_img_size_compatibility(img_size, window_size):
 # 設置日誌格式
 def setup_logger(local_rank):
     # 創建日誌格式
-    log_format = '%(asctime)s - %(levelname)s - Rank[%(rank)s] - %(message)s'
+    log_format = '%(asctime)s - %(levellevel)s - Rank[%(rank)s] - %(message)s'
     date_format = '%Y-%m-%d %H:%M:%S'
     
     # 創建一個自定義的過濾器，添加rank信息
@@ -182,17 +182,24 @@ class Food101Dataset(Dataset):
         label = self.dataframe.iloc[idx]['label']
         label = self.encoder.get_idx(label)
 
-        # 增加異常處理，確保文件存在且可讀
-        try:
-            image = Image.open(img_path).convert("RGB")
-            if self.transform:
-                image = self.transform(image)
-            return image, label
-        except Exception as e:
-            print(f"Error loading image {img_path}: {e}")
-            # 返回一個隨機生成的圖像和原始標籤，而不是拋出異常
-            dummy_image = torch.randn(3, 192, 192)
-            return dummy_image, label
+        # 增加更強大的錯誤處理和圖像讀取重試機制
+        for attempt in range(3):  # 重試3次
+            try:
+                image = Image.open(img_path).convert("RGB")
+                if self.transform:
+                    image = self.transform(image)
+                return image, label
+            except Exception as e:
+                if attempt < 2:  # 如果這不是最後一次重試
+                    time.sleep(0.1)  # 短暫等待
+                    continue
+                else:
+                    print(f"Error loading image {img_path}: {e}")
+                    # 返回一個與訓練設置相符的隨機圖像而不是拋出異常
+                    dummy_image = torch.randn(3, 224, 224)
+                    # 歸一化隨機張量使其統計特性與實際圖像更接近
+                    dummy_image = (dummy_image - dummy_image.mean()) / dummy_image.std()
+                    return dummy_image, label
 
 
 # Updated prepare_dataframe function
@@ -302,7 +309,7 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
 
         # 當達到指定的累積步數或是最後一個批次時，更新參數
         is_last_batch = (i == len(dataloader) - 1)
-        if accumulation_counter == gradient_accumulation_steps or is_last_batch:
+        if accumulation_counter == gradient_accumulation_steps或is_last_batch:
             # 在更新前應用梯度裁剪 - 使用更小的閾值
             try:
                 scaler.unscale_(optimizer)
@@ -583,14 +590,16 @@ if __name__ == "__main__":
         except Exception as e:
             logger.warning(f"Initial synchronization failed: {e}")
 
-        # 更新參數設置 - 提高批次大小以利用更多 GPU 記憶體
-        BATCH_SIZE = 64  # 從32增加到64，充分利用 GPU 記憶體
-        IMAGE_SIZE = 256  # 保持不變
-        WINDOW_SIZE = 8  # 確保與window_size參數匹配
-        NUM_EPOCHS = 100   
+        # 更新參數設置 - 從頭訓練優化設定
+        BATCH_SIZE = 32  # 降低批次大小，使訓練更穩定
+        IMAGE_SIZE = 224  # 降低圖像大小，減少計算量
+        WINDOW_SIZE = 7  # 確保與圖像大小匹配的窗口大小
+        NUM_EPOCHS = 200  # 增加訓練輪數，從頭訓練需要更長時間
         IMAGE_ROOT = "food-101/images"
         TRAIN_FILE = "food-101/meta/train.txt"
         TEST_FILE = "food-101/meta/test.txt"
+        GRAD_ACCUM_STEPS = 4  # 增加梯度累積步驟
+        WARMUP_EPOCHS = 20  # 更長的預熱期
 
         LABELS = [
             'apple_pie',
@@ -696,17 +705,17 @@ if __name__ == "__main__":
             'waffles'
         ]
 
-        # 更新訓練集增強策略，添加 RandAugment, RandomErasing
+        # 更新訓練集增強策略，減少強度以提高穩定性
         train_transform = transforms.Compose([
-            transforms.Resize((IMAGE_SIZE + 32, IMAGE_SIZE + 32)),  # 過度大小以便隨機裁剪
-            transforms.RandomResizedCrop(IMAGE_SIZE),
-            transforms.RandomHorizontalFlip(),
-            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.2),
-            RandAugment(num_ops=2, magnitude=5),  # 降低 RandAugment 強度以提高穩定性
+            transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),  # 簡化調整大小操作
+            transforms.RandomCrop(IMAGE_SIZE, padding=32, padding_mode='reflect'),  # 使用邊界填充的隨機裁剪
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),  # 降低色彩抖動強度
+            RandAugment(num_ops=1, magnitude=3),  # 顯著降低RandAugment強度
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                               std=[0.229, 0.224, 0.225]),
-            RandomErasing(p=0.15, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0, inplace=False),  # 降低RandomErasing概率
+                                std=[0.229, 0.224, 0.225]),
+            RandomErasing(p=0.1, scale=(0.02, 0.2), ratio=(0.3, 3.3), value=0, inplace=False),  # 進一步降低RandomErasing強度
         ])
 
         # 測試集轉換保持簡單
@@ -719,12 +728,13 @@ if __name__ == "__main__":
         ])
         
         # 設置 Mixup 和 Cutmix
+        # 使用Mixup但降低強度，這對從頭訓練時有幫助但不能過強
         mixup_args = {
-            'mixup_alpha': 0.8,
-            'cutmix_alpha': 1.0,
+            'mixup_alpha': 0.4,  # 降低mixup alpha值
+            'cutmix_alpha': 0.4,  # 降低cutmix alpha值
             'cutmix_minmax': None,
-            'prob': 0.5,
-            'switch_prob': 0.5,
+            'prob': 0.3,          # 降低mixup/cutmix的應用機率
+            'switch_prob': 0.3,   # 降低切換機率
             'mode': 'batch',
             'label_smoothing': 0.1,
             'num_classes': len(LABELS)
@@ -766,10 +776,13 @@ if __name__ == "__main__":
         # 初始化 SwinV2 模型，使用容錯性更高的配置
         model = swin_transformer_v2_base_classifier(
             input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
-            window_size=8,  # 保持窗口大小與圖像尺寸兼容
+            window_size=WINDOW_SIZE,  # 保持窗口大小與圖像尺寸兼容
             num_classes=len(LABELS),
             use_checkpoint=True,  # 使用checkpoint可以減少內存使用但增加計算
-            dropout_path=0.1  # 保持較低的dropout以提高穩定性
+            dropout_path=0.2,  # 增加dropout以減少過擬合
+            depths=[2, 2, 6, 2],  # 減少模型深度以便從頭訓練更有效 
+            embed_dim=64,  # 減少基礎嵌入維度
+            num_heads=[2, 4, 8, 16]  # 調整注意力頭數
         )
         
         model = model.to(device)
@@ -791,26 +804,33 @@ if __name__ == "__main__":
             torch._dynamo.config.suppress_errors = True
             torch._dynamo.config.cache_size_limit = 32  # 限制快取大小
         
-        # 使用 AdamW 優化器，但降低學習率以提高穩定性
+        # 優化器設置 - 使用更適合從頭訓練的配置
         optimizer = optim.AdamW(
             model.parameters(),
-            lr=5e-5,  # 降低學習率，從1e-4降至5e-5
-            weight_decay=0.05,
-            eps=1e-8  # 增加epsilon值以提高數值穩定性
+            lr=1e-3,  # 大幅提高初始學習率，從頭訓練時需要更大的學習率
+            weight_decay=0.01,  # 降低權重衰減，從頭訓練時過大的衰減會阻礙收斂
+            eps=1e-8,  # 保持較高的epsilon值提高數值穩定性
+            betas=(0.9, 0.999)  # 默認動量參數
         )
         
-        # 使用適合 Mixup/Cutmix 的損失函數
-        criterion = SoftTargetCrossEntropy()
+        # 使用適合從頭訓練的損失函數
+        # 從頭訓練時標籤平滑很重要，但平滑係數應該較小
+        base_criterion = LabelSmoothingCrossEntropy(smoothing=0.1)
         
-        # 使用 CosineLRScheduler 設置 cosine decay
+        # 僅在訓練穩定後使用更複雜的損失函數
+        criterion_train = SoftTargetCrossEntropy() if mixup_fn else base_criterion
+        criterion_test = nn.CrossEntropyLoss()  # 測試時使用標準交叉熵
+        
+        # 使用更適合從頭訓練的調度器 - 更長的預熱和較慢的衰減
         scheduler = CosineLRScheduler(
             optimizer,
             t_initial=NUM_EPOCHS,
-            lr_min=1e-6,
-            warmup_t=10,  # 保持10個epoch的預熱期
-            warmup_lr_init=1e-7,
+            lr_min=1e-5,  # 提高最小學習率
+            warmup_t=WARMUP_EPOCHS,  # 使用更長的預熱期(20個epoch)
+            warmup_lr_init=1e-6,  # 從較小的學習率開始預熱
             cycle_limit=1,
             t_in_epochs=True,
+            warmup_prefix=True  # 確保預熱期不計入余弦衰減週期
         )
 
         # 初始化混合精度訓練的scaler，優化設定以更好利用 GPU 記憶體
@@ -876,7 +896,7 @@ if __name__ == "__main__":
             # 在訓練時使用 mixup_fn 和較小的梯度累積步數
             try:
                 train_acc, train_loss = train_epoch_amp(
-                    model, train_loader, optimizer, scheduler, criterion, 
+                    model, train_loader, optimizer, scheduler, criterion_train, 
                     device, scaler, epoch, logger, mixup_fn=mixup_fn,
                     gradient_accumulation_steps=2  # 使用較小的梯度累積步數，以更好地利用 GPU 資源
                 )
@@ -912,7 +932,7 @@ if __name__ == "__main__":
             
             # 在測試時不使用 mixup，使用標準的 CrossEntropyLoss
             try:
-                test_acc, test_loss = test_epoch(model, test_loader, nn.CrossEntropyLoss(), device, logger)
+                test_acc, test_loss = test_epoch(model, test_loader, criterion_test, device, logger)
             except Exception as e:
                 logger.error(f"Error during evaluation: {e}")
                 logger.error(traceback.format_exc())
