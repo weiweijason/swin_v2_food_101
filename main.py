@@ -587,7 +587,7 @@ if __name__ == "__main__":
         BATCH_SIZE = 64  # 從32增加到64，充分利用 GPU 記憶體
         IMAGE_SIZE = 256  # 保持不變
         WINDOW_SIZE = 8  # 確保與window_size參數匹配
-        NUM_EPOCHS = 50    
+        NUM_EPOCHS = 100   
         IMAGE_ROOT = "food-101/images"
         TRAIN_FILE = "food-101/meta/train.txt"
         TEST_FILE = "food-101/meta/test.txt"
