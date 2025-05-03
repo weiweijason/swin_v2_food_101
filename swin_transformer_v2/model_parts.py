@@ -780,19 +780,30 @@ class PatchMerging(nn.Module):
                 input: torch.Tensor) -> torch.Tensor:
         """
         Forward pass
-        :param input: (torch.Tensor) Input tensor of the shape [batch size, in channels, height, width]
+        :param input: (torch.Tensor) Input tensor of the shape [batch size, in channels, height, width] 
+                      or [batch size, tokens, channels]
         :return: (torch.Tensor) Output tensor of the shape [batch size, 2 * in channels, height // 2, width // 2]
         """
-        # Get original shape
+        # 檢查輸入維度
+        if len(input.shape) == 3:  # [B, L, C] 格式
+            batch_size, L, channels = input.shape
+            # 假設輸入序列是來自正方形特徵圖
+            height = width = int(L ** 0.5)
+            # 確保可以整除
+            assert height * width == L, f"輸入序列長度 {L} 無法被解析為正方形特徵圖"
+            # 重塑為 [B, C, H, W] 格式
+            input = input.transpose(1, 2).reshape(batch_size, channels, height, width)
+        
+        # 獲取原始形狀
         batch_size, channels, height, width = input.shape  
-        # Reshape input to [batch size, in channels, height, width]
+        # 轉換為 [B, H, W, C] 格式
         input: torch.Tensor = bchw_to_bhwc(input)
-        # Unfold input
+        # 展開輸入
         input: torch.Tensor = input.unfold(dimension=1, size=2, step=2).unfold(dimension=2, size=2, step=2)
         input: torch.Tensor = input.reshape(batch_size, input.shape[1], input.shape[2], -1)
-        # Normalize input
+        # 規範化輸入
         input: torch.Tensor = self.normalization(input)
-        # Perform linear mapping
+        # 執行線性映射
         output: torch.Tensor = bhwc_to_bchw(self.linear_mapping(input))
         return output
 
