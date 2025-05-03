@@ -697,69 +697,6 @@ class SwinTransformerStage(nn.Module):
                  dropout_path: Union[List[float], float] = 0.0,
                  use_checkpoint: bool = False,
                  sequential_self_attention: bool = False,
-        # Perform linear mapping
-        output: torch.Tensor = bhwc_to_bchw(self.linear_mapping(input))
-        return output
-
-
-class PatchEmbedding(nn.Module):
-    """
-    Module embeds a given image into patch embeddings.
-    """
-
-    def __init__(self,
-                 in_channels: int = 3,
-                 out_channels: int = 96,
-                 patch_size: int = 4) -> None:
-        """
-        Constructor method
-        :param in_channels: (int) Number of input channels
-        :param out_channels: (int) Number of output channels
-        :param patch_size: (int) Patch size to be utilized
-        :param image_size: (int) Image size to be used
-        """
-        # Call super constructor
-        super(PatchEmbedding, self).__init__()
-        # Save parameters
-        self.out_channels: int = out_channels
-        # Init linear embedding as a convolution
-        self.linear_embedding: nn.Module = nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
-                                                     kernel_size=(patch_size, patch_size),
-                                                     stride=(patch_size, patch_size))
-        # Init layer normalization
-        self.normalization: nn.Module = nn.LayerNorm(normalized_shape=out_channels)
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass transforms a given batch of images into a patch embedding
-        :param input: (torch.Tensor) Input images of the shape [batch size, in channels, height, width]
-        :return: (torch.Tensor) Patch embedding of the shape [batch size, patches + 1, out channels]
-        """
-        # Perform linear embedding
-        embedding: torch.Tensor = self.linear_embedding(input)
-        # Perform normalization
-        embedding: torch.Tensor = bhwc_to_bchw(self.normalization(bchw_to_bhwc(embedding)))
-        return embedding
-
-
-class SwinTransformerStage(nn.Module):
-    """
-    This class implements a stage of the Swin transformer including multiple layers.
-    """
-
-    def __init__(self,
-                 in_channels: int,
-                 depth: int,
-                 downscale: bool,
-                 input_resolution: Tuple[int, int],
-                 number_of_heads: int,
-                 window_size: int = 7,
-                 ff_feature_ratio: int = 4,
-                 dropout: float = 0.0,
-                 dropout_attention: float = 0.0,
-                 dropout_path: Union[List[float], float] = 0.0,
-                 use_checkpoint: bool = False,
-                 sequential_self_attention: bool = False,
                  use_deformable_block: bool = False) -> None:
         """
         Constructor method
@@ -769,7 +706,6 @@ class SwinTransformerStage(nn.Module):
         :param input_resolution: (Tuple[int, int]) Input resolution
         :param number_of_heads: (int) Number of attention heads to be utilized
         :param window_size: (int) Window size to be utilized
-        :param shift_size: (int) Shifting size to be used
         :param ff_feature_ratio: (int) Ratio of the hidden dimension in the FFN to the input channels
         :param dropout: (float) Dropout in input mapping
         :param dropout_attention: (float) Dropout rate of attention map
