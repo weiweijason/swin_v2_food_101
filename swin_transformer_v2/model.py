@@ -61,19 +61,18 @@ class SwinTransformerV2(nn.Module):
         for index, (depth, number_of_head) in enumerate(zip(depths, number_of_heads)):
             self.stages.append(
                 SwinTransformerStage(
-                    in_channels=embedding_channels * (2 ** max(index - 1, 0)),
+                    dim=embedding_channels * (2 ** max(index - 1, 0)),  # 修改參數名稱：in_channels -> dim
                     depth=depth,
                     downscale=not (index == 0),
                     input_resolution=(patch_resolution[0] // (2 ** max(index - 1, 0)),
                                       patch_resolution[1] // (2 ** max(index - 1, 0))),
-                    number_of_heads=number_of_head,
+                    num_heads=number_of_head,  # 修改參數名稱：number_of_heads -> num_heads
                     window_size=window_size,
-                    ff_feature_ratio=ff_feature_ratio,
-                    dropout=dropout,
-                    dropout_attention=dropout_attention,
-                    dropout_path=dropout_path[sum(depths[:index]):sum(depths[:index + 1])],
+                    mlp_ratio=ff_feature_ratio,  # 修改參數名稱：ff_feature_ratio -> mlp_ratio
+                    drop=dropout,  # 修改參數名稱：dropout -> drop
+                    attn_drop=dropout_attention,  # 修改參數名稱：dropout_attention -> attn_drop
+                    drop_path=dropout_path[sum(depths[:index]):sum(depths[:index + 1])],
                     use_checkpoint=use_checkpoint,
-                    sequential_self_attention=sequential_self_attention,
                     use_deformable_block=use_deformable_block and (index > 0)
                 ))
 
