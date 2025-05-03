@@ -588,9 +588,15 @@ class SwinTransformerBlock(nn.Module):
             self.register_buffer("attn_mask", None)
     
     def forward(self, x):
-        H, W = self.input_resolution
-        B, L, C = x.shape
-        assert L == H * W, "input feature has wrong size"
+        # 檢查輸入張量的維度，並根據需要進行轉換
+        if len(x.shape) == 4:  # 如果是 [B, C, H, W] 格式
+            B, C, H, W = x.shape
+            # 將輸入從 [B, C, H, W] 轉換為 [B, H*W, C]
+            x = x.permute(0, 2, 3, 1).reshape(B, H*W, C)
+        else:  # 假設已經是 [B, L, C] 格式
+            B, L, C = x.shape
+            H, W = self.input_resolution
+            assert L == H * W, "input feature has wrong size"
         
         shortcut = x
         x = self.norm1(x)  # PreNorm
