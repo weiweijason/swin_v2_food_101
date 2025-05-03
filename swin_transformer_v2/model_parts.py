@@ -64,7 +64,7 @@ def unfold(input: torch.Tensor,
     :return: (torch.Tensor) Unfolded tensor of the shape [batch size * windows, channels, window size, window size]
     """
     # Get original shape
-    _, channels, height, width = input.shape  # type: int, int, int, int
+    _, channels, height, width = input.shape  
     # Unfold input
     output: torch.Tensor = input.unfold(dimension=3, size=window_size, step=window_size) \
         .unfold(dimension=2, size=window_size, step=window_size)
@@ -626,7 +626,7 @@ class PatchMerging(nn.Module):
         :return: (torch.Tensor) Output tensor of the shape [batch size, 2 * in channels, height // 2, width // 2]
         """
         # Get original shape
-        batch_size, channels, height, width = input.shape  # type: int, int, int, int
+        batch_size, channels, height, width = input.shape  
         # Reshape input to [batch size, in channels, height, width]
         input: torch.Tensor = bchw_to_bhwc(input)
         # Unfold input

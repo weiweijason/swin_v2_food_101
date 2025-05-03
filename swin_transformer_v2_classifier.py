@@ -55,9 +55,9 @@ class SwinTransformerV2Classifier(nn.Module):
         self.backbone = SwinTransformerV2(
             input_resolution=input_resolution,
             window_size=window_size,
-            drop_path_rate=dropout_path,
+            dropout_path=dropout_path,
             depths=depths,
-            embed_dim=embed_dim,
+            embedding_channels=embed_dim,
             number_of_heads=num_heads,
             use_checkpoint=use_checkpoint
         )
