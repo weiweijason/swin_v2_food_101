@@ -309,7 +309,7 @@ def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, 
 
         # 當達到指定的累積步數或是最後一個批次時，更新參數
         is_last_batch = (i == len(dataloader) - 1)
-        if accumulation_counter == gradient_accumulation_steps或is_last_batch:
+        if accumulation_counter == gradient_accumulation_steps or is_last_batch:
             # 在更新前應用梯度裁剪 - 使用更小的閾值
             try:
                 scaler.unscale_(optimizer)
