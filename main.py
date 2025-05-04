@@ -572,11 +572,11 @@ if __name__ == "__main__":
         model = nn.parallel.DistributedDataParallel(
             model, 
             device_ids=[local_rank],
-            find_unused_parameters=False,  # 禁用未使用參數檢測，因為我們已確保所有參數都有梯度流動
+            find_unused_parameters=True,  # 重新啟用找尋未使用參數
             broadcast_buffers=False  # 保持關閉緩衝區廣播以減少通信量
         )
 
-        logger.info("已在模型中啟用虛擬損失，確保所有參數參與計算")
+        logger.info("已啟用 find_unused_parameters，將嘗試跟踪未使用的參數")
         
         # 設置模型為 DDP 模式，啟用虛擬損失以解決未使用參數問題
         model.module.in_ddp_mode = True

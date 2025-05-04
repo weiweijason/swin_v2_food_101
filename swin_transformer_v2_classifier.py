@@ -112,30 +112,31 @@ class SwinTransformerV2Classifier(nn.Module):
 
     def forward(self, x):
         """前向傳播函數"""
+        # 使用旁路網絡確保前面的層也有梯度流動
         features = self.backbone(x)
         
         # 使用最後一層特徵進行分類
-        x = features[-1]
+        output = features[-1]
         
-        # 強制所有參數接收梯度 - 即使在測試模式下也保持活躍
-        # 創建一個非常小的虛擬損失，不影響實際結果但確保梯度流動
-        dummy_loss = 0.0
-        for i, p in enumerate(self.parameters()):
-            # 只處理需要梯度的參數
-            if p.requires_grad:
-                # 使用參數的均值乘以一個極小數添加到損失中
-                dummy_loss = dummy_loss + 0.0 * torch.mean(p)
-        
-        # 將虛擬損失添加到最終輸出
-        x = x + dummy_loss
+        # 強制所有參數參與梯度計算 - 這是解決 DDP 中未使用參數問題的關鍵
+        if self.training:
+            dummy_loss = 0.0
+            # 直接迭代每個參數，使用更直接的方式確保梯度流動
+            for name, p in self.named_parameters():
+                if p.requires_grad:
+                    # 使用極小數乘以參數的平均值，確保梯度可以流動但不改變結果
+                    dummy_loss = dummy_loss + torch.sum(p.view(-1)[0:1]) * 0.0
+            
+            # 將虛擬損失添加到輸出中
+            output = output + dummy_loss
         
         # 如果使用avgpool，則使用自定義頭部處理
         if self.use_avgpool:
-            if x.dim() == 3:  # 處理序列輸出 (B, L, C)
-                x = x.transpose(1, 2)  # 轉換為 (B, C, L)
-            x = self.head(x)
+            if output.dim() == 3:  # 處理序列輸出 (B, L, C)
+                output = output.transpose(1, 2)  # 轉換為 (B, C, L)
+            output = self.head(output)
         
-        return x
+        return output
 
 
 def swin_transformer_v2_base_classifier(input_resolution: Tuple[int, int] = (224, 224),
