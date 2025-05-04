@@ -13,248 +13,108 @@ class SwinTransformerV2Classifier(nn.Module):
     This class implements the Swin Transformer V2 with a classification head.
     """
 
-    def __init__(self, input_resolution, window_size, num_classes, drop_rate=0.0,
-                 dropout_path=0.0, depths=[2, 2, 6, 2], embed_dim=64, num_heads=[2, 4, 8, 16],
-                 use_checkpoint=False):
+    def __init__(self, input_resolution=(224, 224), window_size=7, embed_dim=128, depths=[2, 2, 18, 2], 
+                 num_heads=[4, 8, 16, 32], mlp_ratio=4., qkv_bias=True, drop_rate=0.1, attn_drop_rate=0.1, 
+                 drop_path_rate=0.1, norm_layer=nn.LayerNorm, patch_size=4, ape=False, patch_norm=True, 
+                 use_checkpoint=False, num_classes=1000, pretrained=None, use_avgpool=True, dropout_path=0.2):
         """
-        初始化 SwinV2 分類器模型
-        
+        Swin Transformer V2 分類器模型的初始化函數
+
         參數:
-        ------
-        input_resolution : tuple(int, int)
-            輸入圖像分辨率
-        window_size : int
-            窗口注意力的窗口大小
-        num_classes : int
-            分類類別數量
-        drop_rate : float
-            丟棄率
-        dropout_path : float
-            路徑丟棄率
-        depths : list[int]
-            每層的塊數
-        embed_dim : int
-            初始嵌入維度
-        num_heads : list[int]
-            每層的注意力頭數
-        use_checkpoint : bool
-            是否使用梯度檢查點
+            pretrained: 預訓練模型路徑，若為None則從頭開始訓練
+            use_avgpool: 是否在backbone後使用全局平均池化
+            dropout_path: 深度Dropout率，用於正則化深層網絡
         """
         super().__init__()
-        
-        # 增加針對從頭訓練的特殊初始化
-        self.apply(self._init_weights)
-        
-        # 保存初始化參數
-        self.input_resolution = input_resolution
         self.num_classes = num_classes
-        self.depths = depths
-        self.num_features = embed_dim * 8  # 2^3
-        
-        # 添加 dummy_param 參數，用於確保梯度流動
-        self.dummy_param = nn.Parameter(torch.ones(1))
-        
-        # 添加輔助分類頭，用於訓練階段
-        self.aux_head = nn.Sequential(
-            nn.Linear(self.num_features, self.num_features // 2),
-            nn.BatchNorm1d(self.num_features // 2),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
-            nn.Linear(self.num_features // 2, num_classes)
-        )
-        
-        # 建立主幹模型
+        self.use_avgpool = use_avgpool
+
+        # 建立 Swin Transformer V2 骨幹
         self.backbone = SwinTransformerV2(
-            in_channels=3,  # 添加默認的输入通道數（RGB圖像）
-            input_resolution=input_resolution,
-            window_size=window_size,
-            dropout_path=dropout_path,
-            depths=depths,
-            embedding_channels=embed_dim,
-            number_of_heads=num_heads,
-            use_checkpoint=use_checkpoint
+            img_size=input_resolution if isinstance(input_resolution, int) else input_resolution[0],
+            patch_size=patch_size, 
+            in_chans=3, 
+            num_classes=num_classes if not use_avgpool else 0,  # 若使用avgpool則num_classes設為0
+            embed_dim=embed_dim, 
+            depths=depths, 
+            num_heads=num_heads, 
+            window_size=window_size, 
+            mlp_ratio=mlp_ratio, 
+            qkv_bias=qkv_bias, 
+            drop_rate=drop_rate, 
+            attn_drop_rate=attn_drop_rate, 
+            drop_path_rate=dropout_path,  # 使用較高的dropout_path防止過擬合
+            norm_layer=norm_layer, 
+            ape=ape, 
+            patch_norm=patch_norm, 
+            use_checkpoint=use_checkpoint,
+            pretrained_window_sizes=[12, 12, 12, 6]  # 使用預訓練window size參數
         )
+
+        # 獲取backbone最後一層特徵的維度
+        backbone_output_dim = embed_dim * 2 ** (len(depths) - 1)
         
-        # 分類頭初始化加入批次歸一化以提高穩定性
-        self.norm = nn.BatchNorm2d(self.num_features)  # 使用BN代替LayerNorm，提高從頭訓練穩定性
-        self.avgpool = nn.AdaptiveAvgPool2d(1)
-        self.flat = nn.Flatten(1)
-        self.drop = nn.Dropout(drop_rate)
-        # 分類頭使用兩層MLP，引入非線性並降低過擬合
-        self.head = nn.Sequential(
-            nn.Linear(self.num_features, self.num_features // 2),
-            nn.BatchNorm1d(self.num_features // 2),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3),  # 增加更強的Dropout
-            nn.Linear(self.num_features // 2, num_classes)
-        )
-    
-    def _init_weights(self, m):
-        """為從頭訓練設計的權重初始化方法"""
-        if isinstance(m, nn.Linear):
-            # 分類頭使用較小的初始化範圍
-            nn.init.trunc_normal_(m.weight, std=0.01)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
-        elif isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm1d):
-            nn.init.constant_(m.weight, 1)
-            nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.Conv2d):
-            # 卷積層使用kaiming初始化
-            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-    
-    def enable_static_graph(self):
-        """使用版本兼容的方式啟用靜態圖模式"""
-        # 嘗試使用新版本的 _set_static_graph() 方法
-        if hasattr(nn.Module, '_set_static_graph'):
-            try:
-                self._set_static_graph()  # 新版本 PyTorch
-                print("使用 _set_static_graph() 啟用靜態圖")
-            except Exception as e:
-                print(f"啟用靜態圖時發生錯誤: {e}")
-                pass
-        # 嘗試使用舊版本的 set_static_graph() 方法
-        elif hasattr(torch._C, '_jit_set_graph_executor_optimize'):
-            try:
-                torch._C._jit_set_graph_executor_optimize(False)
-                print("使用 _jit_set_graph_executor_optimize() 禁用圖優化")
-            except Exception as e:
-                print(f"禁用圖優化時發生錯誤: {e}")
-                pass
+        # 使用較複雜的分類頭，增強食物特徵提取能力
+        if use_avgpool:
+            # 改進分類頭，替換為更強大的分類器
+            # 增加中間層、殘差連接和更多的正則化
+            self.head = nn.Sequential(
+                nn.AdaptiveAvgPool1d(1),
+                nn.Flatten(),
+                nn.Linear(backbone_output_dim, backbone_output_dim // 2),
+                nn.LayerNorm(backbone_output_dim // 2),  # 使用LayerNorm代替BatchNorm提高穩定性
+                nn.GELU(),  # 使用GELU激活函數
+                nn.Dropout(0.3),  # 較高的dropout率
+                nn.Linear(backbone_output_dim // 2, backbone_output_dim // 4),
+                nn.LayerNorm(backbone_output_dim // 4),
+                nn.GELU(),
+                nn.Dropout(0.2),
+                nn.Linear(backbone_output_dim // 4, num_classes)
+            )
         else:
-            print("警告：無法啟用靜態圖模式，可能會影響分散式訓練的穩定性")
-    
-    def _disable_checkpointing(self, module):
-        """遞迴地禁用所有模塊的checkpointing功能"""
-        if hasattr(module, 'use_checkpoint'):
-            module.use_checkpoint = False
-        for child in module.children():
-            self._disable_checkpointing(child)
-    
-    def update_resolution(self, new_window_size: int, new_input_resolution: Tuple[int, int]) -> None:
-        """
-        Method updates the window size and input resolution
-        :param new_window_size: (int) New window size
-        :param new_input_resolution: (Tuple[int, int]) New input resolution
-        """
-        self.backbone.update_resolution(new_window_size=new_window_size, new_input_resolution=new_input_resolution)
-    
-    def get_intermediate_features(self, x: torch.Tensor) -> List[torch.Tensor]:
-        """
-        獲取所有中間特徵
-        :param x: (torch.Tensor) 輸入張量
-        :return: (List[torch.Tensor]) 中間特徵列表
-        """
-        return self.backbone(x)
-    
-    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass to extract features
-        :param x: (torch.Tensor) Input tensor of shape [B, C, H, W]
-        :return: (torch.Tensor) Feature tensor
-        """
-        # Extract features from backbone - 保存所有階段的特徵
-        with torch.no_grad():
-            # 使用no_grad包装backbone的前向傳播，然後手動設置requires_grad=True
-            # 這樣可以簡化計算圖並避免重入問題
-            features_list = self.backbone(x)
-            features_detached = [feat.detach().requires_grad_(True) for feat in features_list]
+            self.head = nn.Identity()
         
-        # Apply dummy parameter to all features to ensure gradient flow
-        features_sum = 0
-        for feat in features_detached:
-            # 加入一個極小的虛擬參數運算，確保梯度能流向所有特徵
-            # 檢查 feat 的維度，確保可以使用 adaptive_avg_pool2d
-            if len(feat.shape) == 4:  # [B, C, H, W] 格式
-                feat_pooled = F.adaptive_avg_pool2d(feat, 1).view(feat.size(0), -1)
-            else:  # [B, L, C] 格式
-                # 對於序列格式，直接在 L 維度上平均
-                feat_pooled = feat.mean(dim=1)
-                
-            features_sum = features_sum + 0.0001 * self.dummy_param * feat_pooled.sum()
+        # 載入預訓練權重
+        if pretrained is not None:
+            try:
+                self.load_pretrained(pretrained)
+                print(f"成功載入預訓練權重: {pretrained}")
+            except Exception as e:
+                print(f"無法載入預訓練權重: {e}，將從頭開始訓練")
+
+    def load_pretrained(self, pretrained_path):
+        """載入預訓練權重並處理可能的不匹配"""
+        checkpoint = torch.load(pretrained_path, map_location='cpu')
         
-        # Get the last stage features
-        x = features_detached[-1]
+        # 檢查checkpoint格式，可能包含'model'鍵
+        if 'model' in checkpoint:
+            checkpoint = checkpoint['model']
         
-        # 檢查 x 的維度，並進行相應的處理
-        if len(x.shape) == 4:  # [B, C, H, W] 格式
-            B, C, H, W = x.shape
-            # Convert to BHWC format for layer norm
-            x = x.permute(0, 2, 3, 1)  # B, H, W, C
+        # 處理key不匹配的情況
+        state_dict = {}
+        for k, v in checkpoint.items():
+            # 移除'backbone.'前綴如果有的話
+            if k.startswith('backbone.'):
+                k = k[9:]
             
-            # Apply batch norm (需要將 [B, H, W, C] 轉換為 [B, C, H, W])
-            x = x.permute(0, 3, 1, 2)  # 轉回 [B, C, H, W]
-            x = self.norm(x)
-            
-            # Global average pooling
-            x = self.avgpool(x).view(B, C)  # B, C
-            
-        else:  # [B, L, C] 格式
-            B, L, C = x.shape
-            
-            # 創建一個適合 3D 張量的標準化層
-            if not hasattr(self, 'norm_3d'):
-                self.norm_3d = nn.LayerNorm(C).to(x.device)
-                
-            # 應用層標準化
-            x = self.norm_3d(x)
-            
-            # 全局平均池化
-            x = x.mean(dim=1)  # [B, C]
+            # 只載入backbone部分的權重
+            if k.startswith('patch_embed') or k.startswith('layers') or k.startswith('norm'):
+                state_dict[f'backbone.{k}'] = v
         
-        # 增強特徵表示
-        if hasattr(self, 'feature_enhance'):
-            x = self.feature_enhance(x)
+        # 載入權重，允許部分不匹配
+        self.backbone.load_state_dict(state_dict, strict=False)
+
+    def forward(self, x):
+        """前向傳播函數"""
+        x = self.backbone(x)
         
-        # 添加虛擬損失項以確保梯度流動
-        if self.training:
-            x = x + 0.0001 * features_sum.expand_as(x)
+        # 如果使用avgpool，則使用自定義頭部處理
+        if self.use_avgpool:
+            if x.dim() == 3:  # 處理序列輸出 (B, L, C)
+                x = x.transpose(1, 2)  # 轉換為 (B, C, L)
+            x = self.head(x)
         
         return x
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass
-        :param x: (torch.Tensor) Input tensor of shape [B, C, H, W]
-        :return: (torch.Tensor) Output tensor of shape [B, num_classes]
-        """
-        # Extract features
-        x = self.forward_features(x)
-        
-        # Apply feature scaling from Swin v2 paper
-        # This helps stabilize the feature magnitude during training
-        if hasattr(self, 'feature_scaling') and self.training:
-            x = self.feature_scaling(x)
-            
-        # 使用輔助頭計算額外的輸出，確保梯度流動
-        if self.training:
-            # 計算主分類輸出
-            main_output = self.head(x)
-            
-            # 計算輔助分類輸出，但使用stop_gradient避免重複計算
-            with torch.no_grad():
-                aux_features = x.detach()
-            aux_output = self.aux_head(aux_features)
-            
-            # 將輔助輸出加入主輸出，但權重很小，不影響實際預測結果
-            output = main_output + 0.0001 * aux_output
-            
-            # 添加虛擬參數，確保所有參數參與運算
-            if main_output.size(1) > 0:  # 確保輸出不是空張量
-                dummy_expand = self.dummy_param.view(1, 1).expand(output.size(0), 1)
-                if output.size(1) > 1:
-                    dummy_expand = dummy_expand.expand(output.size(0), output.size(1))
-                output = output + 0.0001 * dummy_expand
-            
-            return output
-        else:
-            # 推理階段只使用主分類頭
-            return self.head(x)
 
 
 def swin_transformer_v2_base_classifier(input_resolution: Tuple[int, int] = (224, 224),

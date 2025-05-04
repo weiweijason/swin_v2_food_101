@@ -594,12 +594,15 @@ if __name__ == "__main__":
         BATCH_SIZE = 32  # 降低批次大小，使訓練更穩定
         IMAGE_SIZE = 224  # 降低圖像大小，減少計算量
         WINDOW_SIZE = 7  # 確保與圖像大小匹配的窗口大小
-        NUM_EPOCHS = 200  # 增加訓練輪數，從頭訓練需要更長時間
+        NUM_EPOCHS = 100  # 減少訓練輪數，因為使用預訓練權重後收斂更快
         IMAGE_ROOT = "food-101/images"
         TRAIN_FILE = "food-101/meta/train.txt"
         TEST_FILE = "food-101/meta/test.txt"
-        GRAD_ACCUM_STEPS = 4  # 增加梯度累積步驟
-        WARMUP_EPOCHS = 20  # 更長的預熱期
+        GRAD_ACCUM_STEPS = 2  # 減少梯度累積步驟，降低數值不穩定性
+        WARMUP_EPOCHS = 5  # 縮短預熱期，使用預訓練權重不需要太長的預熱
+
+        # 使用預訓練權重路徑
+        PRETRAINED_WEIGHTS = "outputs/pretrained/swinv2_base_patch4_window12to16_192to256.pth"
 
         LABELS = [
             'apple_pie',

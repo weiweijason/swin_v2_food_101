@@ -19,7 +19,7 @@ from main import Label_encoder, Food101Dataset, generate_cam_swin_v2, visualize_
 
 def generate_cam_swin_v2_test(model, input_tensor, class_idx=None):
     """
-    為非DDP模型生成Class Activation Map
+    為Swin Transformer V2模型生成Class Activation Map，優化版本
     :param model: 直接載入的SwinV2模型（非DDP模型）
     :param input_tensor: 輸入圖像張量 [1, C, H, W]
     :param class_idx: 目標類別索引（若為None則使用預測類別）
@@ -29,35 +29,45 @@ def generate_cam_swin_v2_test(model, input_tensor, class_idx=None):
     device = next(model.parameters()).device
     input_tensor = input_tensor.to(device)
     
+    # 追蹤梯度和激活值
     gradients = []
     activations = []
     
-    # 註冊鉤子以獲取梯度和啟動
+    # 註冊鉤子以獲取梯度和激活值
     def forward_hook(module, input, output):
         activations.append(output.detach())
     
     def backward_hook(module, grad_input, grad_output):
-        if grad_output[0] is not None:
-            gradients.append(grad_output[0].detach())
+        gradients.append(grad_output[0].detach())
     
-    # 尋找適合的層來註冊鉤子
+    # 尋找適合的層來註冊鉤子 - 選擇最後的stage和block
     try:
+        # 嘗試找到模型中的最後一個stage的最後一個block
         target_layer = model.backbone.stages[-1].blocks[-1]
+        print(f"成功定位到目標層: {target_layer.__class__.__name__}")
     except (AttributeError, IndexError) as e:
-        print(f"無法找到目標層: {e}")
-        print("嘗試使用後備方法...")
-        # 後備方法：找到模型中的最後一個可用於CAM的層
+        print(f"標準方法無法找到目標層: {e}")
+        
+        # 第一個後備方法：遍歷模型尋找任何包含"blocks"的最後層
         target_layer = None
         for name, module in model.named_modules():
-            if isinstance(module, nn.Conv2d) or "blocks" in name:
+            if "stages" in name and "blocks" in name:
                 target_layer = module
+                print(f"使用後備方法找到層: {name}")
+        
+        # 第二個後備方法：尋找任何卷積層或注意力層
+        if target_layer is None:
+            for name, module in model.named_modules():
+                if isinstance(module, nn.Conv2d) or "attn" in name.lower():
+                    target_layer = module
+                    print(f"使用卷積/注意力層作為目標: {name}")
+                    break
         
         if target_layer is None:
-            # 如果仍找不到合適的層，返回一個空的熱力圖
             print("無法找到合適的層用於生成CAM，返回空熱力圖")
             return np.zeros((input_tensor.shape[2], input_tensor.shape[3]))
     
-    # 註冊鉤子
+    # 註冊鉤子到目標層
     handle_fwd = target_layer.register_forward_hook(forward_hook)
     handle_bwd = target_layer.register_backward_hook(backward_hook)
     
@@ -65,77 +75,102 @@ def generate_cam_swin_v2_test(model, input_tensor, class_idx=None):
         # 前向傳播
         model.eval()
         with torch.set_grad_enabled(True):
+            # 確保輸入張量需要梯度
+            input_tensor.requires_grad_(True)
+            
+            # 執行前向傳播
             output = model(input_tensor)
+            
+            # 如果沒有指定類別，使用預測的類別
             if class_idx is None:
                 class_idx = output.argmax(dim=1).item()
             
+            # 檢查輸出形狀的有效性
             if len(output.shape) <= 1 or output.shape[1] <= class_idx:
                 print(f"輸出形狀不正確: {output.shape}, 類別索引: {class_idx}")
-                # 返回空熱力圖
                 return np.zeros((input_tensor.shape[2], input_tensor.shape[3]))
-            
-            # 確保模型中的所有參數都需要梯度
-            output_for_backward = output[0, class_idx]
             
             # 反向傳播
             model.zero_grad()
-            output_for_backward.backward()
+            output_for_backward = output[0, class_idx]
+            output_for_backward.backward(retain_graph=True)
             
             # 檢查是否成功計算梯度
             if len(gradients) == 0:
-                print("反向傳播未產生梯度！檢查是否使用了正確的layer或模型")
-                # 返回隨機熱力圖
-                return np.random.rand(input_tensor.shape[2], input_tensor.shape[3])
+                print("未捕捉到梯度！嘗試使用替代方法...")
+                
+                # 嘗試直接計算輸入的梯度
+                if input_tensor.grad is not None:
+                    print("使用輸入梯度代替特徵圖梯度")
+                    # 使用輸入梯度生成簡單的熱力圖
+                    input_grad = input_tensor.grad[0].sum(dim=0)
+                    input_grad = input_grad.abs()
+                    input_grad = input_grad / (input_grad.max() + 1e-8)
+                    return input_grad.cpu().numpy()
+                return np.zeros((input_tensor.shape[2], input_tensor.shape[3]))
             
             if len(activations) == 0:
-                print("前向傳播未產生特徵！檢查是否使用了正確的layer或模型")
-                # 返回隨機熱力圖
-                return np.random.rand(input_tensor.shape[2], input_tensor.shape[3])
+                print("未捕捉到特徵激活值！")
+                return np.zeros((input_tensor.shape[2], input_tensor.shape[3]))
             
-            # 獲取梯度和啟動
+            # 提取梯度和激活值
             grad = gradients[0]
             act = activations[0]
             
-            # 檢查梯度和特徵的形狀
-            if grad.ndim != 4 or act.ndim != 4:
-                print(f"梯度或特徵的形狀不正確: 梯度={grad.shape}, 特徵={act.shape}")
-                # 嘗試重塑為4D張量
+            # 處理形狀問題，確保梯度和激活值有正確的形狀
+            if grad.ndim != 4:
+                print(f"調整梯度形狀 from {grad.shape}")
                 if grad.ndim == 3:
                     grad = grad.unsqueeze(0)
+                elif grad.ndim == 2:
+                    grad = grad.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+            
+            if act.ndim != 4:
+                print(f"調整激活值形狀 from {act.shape}")
                 if act.ndim == 3:
                     act = act.unsqueeze(0)
+                elif act.ndim == 2:
+                    act = act.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
             
-            # 計算權重
-            # 嘗試找出可以取平均的維度
-            if grad.ndim == 4:
-                weights = grad.mean(dim=(2, 3), keepdim=True)
-            else:
-                # 如果梯度不是4D張量，嘗試使用其他方法
-                weights = grad.mean(dim=0, keepdim=True)
+            # 針對Transformer的特殊處理：如果激活值是3D的（例如[B, tokens, C]），
+            # 則重塑為4D張量以適應空間區域
+            if act.ndim == 3:
+                B, N, C = act.shape
+                H = W = int(math.sqrt(N))
+                act = act.transpose(1, 2).view(B, C, H, W)
+            
+            # 計算權重 - 針對Transformer結構優化
+            # GAP (Global Average Pooling) over the gradient
+            weights = grad.mean(dim=(2, 3), keepdim=True)
+            
+            # 優化：標準化權重以突顯重要特徵
+            weights = weights / (weights.norm(dim=1, keepdim=True) + 1e-5)
             
             # 生成CAM
-            if act.ndim == 4 and weights.ndim in [2, 4]:
-                if weights.ndim == 2:
-                    weights = weights.unsqueeze(-1).unsqueeze(-1)
-                cam = (weights * act).sum(dim=1, keepdim=True)
-            else:
-                # 如果特徵或權重的形狀不兼容，嘗試適應
-                print(f"嘗試適應特徵和權重形狀: 特徵={act.shape}, 權重={weights.shape}")
-                cam = torch.einsum('ijk,i->jk', act.reshape(act.size(0), -1, act.size(-1)*act.size(-2)), 
-                                weights.reshape(weights.size(0), -1)).reshape(act.size(-2), act.size(-1))
-                cam = cam.unsqueeze(0).unsqueeze(0)
+            cam = (weights * act).sum(dim=1, keepdim=True)
             
+            # 應用RELU來只保留正面貢獻
             cam = torch.relu(cam)
-            cam = cam - cam.min()
-            cam_max = cam.max()
-            if cam_max != 0:
-                cam = cam / cam_max
             
-            # 返回結果
-            if cam.ndim == 4:
-                return cam[0, 0].detach().cpu().numpy()
-            else:
-                return cam.detach().cpu().numpy()
+            # 歸一化CAM
+            if cam.max() != 0:
+                cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
+            
+            # 優化：應用高斯平滑處理以減少噪點
+            from kornia.filters import gaussian_blur2d
+            cam = gaussian_blur2d(cam, kernel_size=(5, 5), sigma=(1.5, 1.5))
+            
+            # 優化：進行門限處理，抑制低值區域
+            # 將小於平均值的區域設為0，以突顯顯著區域
+            cam_mean = cam.mean()
+            cam = torch.where(cam < cam_mean*0.8, torch.zeros_like(cam), cam)
+            
+            # 再次歸一化
+            if cam.max() != 0:
+                cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
+            
+            # 返回CAM作為numpy數組
+            return cam[0, 0].cpu().numpy()
                 
     except Exception as e:
         print(f"生成CAM時發生錯誤: {e}")
