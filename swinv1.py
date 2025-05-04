@@ -171,9 +171,21 @@ def visualize_cam(image, cam):
 
 # Main Program
 if __name__ == "__main__":
-    torch.distributed.init_process_group(backend="nccl")
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
+    # 設定是否使用分散式訓練
+    use_distributed = False
+    local_rank = 0
+    
+    # 檢查環境變數，決定是否使用分散式訓練
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        use_distributed = True
+        torch.distributed.init_process_group(backend="nccl")
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        print(f"分散式訓練已初始化，local_rank: {local_rank}")
+    else:
+        print("使用單一GPU訓練模式")
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        print(f"使用設備: {device}")
 
     BATCH_SIZE = 32
     IMAGE_SIZE = 224
@@ -300,36 +312,51 @@ if __name__ == "__main__":
     train_dataset = Food101Dataset(train_df, encoder, transform)
     test_dataset = Food101Dataset(test_df, encoder, transform)
 
-    train_sampler = DistributedSampler(train_dataset)
-    test_sampler = DistributedSampler(test_dataset)
-
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, sampler=test_sampler)
+    if use_distributed:
+        train_sampler = DistributedSampler(train_dataset)
+        test_sampler = DistributedSampler(test_dataset)
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler)
+        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, sampler=test_sampler)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     num_epochs = 30
-    device = torch.device(f"cuda:{local_rank}")
-
+    
     model = timm.create_model('swin_base_patch4_window7_224', pretrained=True, num_classes=len(LABELS))
     model = model.to(device)
-    model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+    
+    if use_distributed:
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+        target_layer = model.module.layers[-1].blocks[-1].norm2
+    else:
+        # 若只使用單一GPU，可以選擇使用 DataParallel 加速
+        if torch.cuda.device_count() > 1:
+            print(f"使用 {torch.cuda.device_count()} 個 GPU 運行 DataParallel")
+            model = nn.DataParallel(model)
+            target_layer = model.module.layers[-1].blocks[-1].norm2
+        else:
+            target_layer = model.layers[-1].blocks[-1].norm2
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
     criterion = nn.CrossEntropyLoss()
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 
-    target_layer = model.module.layers[-1].blocks[-1].norm2
-
     best_acc = 0
     for epoch in range(num_epochs):
         print(f"\nEpoch {epoch + 1}/{num_epochs}")
-        train_sampler.set_epoch(epoch)
+        if use_distributed:
+            train_sampler.set_epoch(epoch)
         train_epoch(model, train_loader, optimizer, scheduler, criterion, device)
         test_acc = test_epoch(model, test_loader, criterion, device)
 
         if test_acc > best_acc:
             best_acc = test_acc
-            if local_rank == 0:
+            if not use_distributed or local_rank == 0:
                 torch.save(model.state_dict(), 'swin_model_test.pth')
+                print(f"模型已保存，準確率: {best_acc:.2f}%")
 
-    if torch.distributed.is_initialized():
+    if use_distributed and torch.distributed.is_initialized():
         destroy_process_group()
