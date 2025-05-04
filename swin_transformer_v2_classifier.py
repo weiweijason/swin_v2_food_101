@@ -31,7 +31,7 @@ class SwinTransformerV2Classifier(nn.Module):
 
         # 建立 Swin Transformer V2 骨幹
         self.backbone = SwinTransformerV2(
-            img_size=input_resolution if isinstance(input_resolution, int) else input_resolution[0],
+            input_resolution=input_resolution,
             patch_size=patch_size, 
             in_chans=3, 
             num_classes=num_classes if not use_avgpool else 0,  # 若使用avgpool則num_classes設為0

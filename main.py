@@ -103,7 +103,7 @@ def check_img_size_compatibility(img_size, window_size):
 # 設置日誌格式
 def setup_logger(local_rank):
     # 創建日誌格式
-    log_format = '%(asctime)s - %(levellevel)s - Rank[%(rank)s] - %(message)s'
+    log_format = '%(asctime)s - %(levelname)s - Rank[%(rank)s] - %(message)s'
     date_format = '%Y-%m-%d %H:%M:%S'
     
     # 創建一個自定義的過濾器，添加rank信息
