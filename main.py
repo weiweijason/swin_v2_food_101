@@ -208,20 +208,21 @@ def prepare_dataframe(file_path, image_root, encoder):
 
 
 # Training and Testing Functions
-def train_epoch(model, dataloader, optimizer, scheduler, criterion, device):
+def train_epoch(model, dataloader, optimizer, scheduler, criterion, device, epoch=None):
     model.train()
     total_loss = 0
     correct = 0
     total = 0
 
-    for inputs, targets in tqdm(dataloader, desc="Training"):
+    for i, (inputs, targets) in enumerate(tqdm(dataloader, desc="Training")):
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
         outputs = model(inputs)
         loss = criterion(outputs, targets)
         loss.backward()
         optimizer.step()
-        scheduler.step()
+        
+        # 移除 scheduler.step() 在這裡的調用，改為在外部每個 epoch 調用一次
 
         total_loss += loss.item()
         _, predicted = outputs.max(1)
@@ -233,7 +234,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, criterion, device):
     return accuracy, total_loss / len(dataloader)
 
 
-def test_epoch(model, dataloader, criterion, device):
+def test_epoch(model, dataloader, criterion, device, logger=None):
     model.eval()
     total_loss = 0
     correct = 0
@@ -699,8 +700,12 @@ if __name__ == "__main__":
             try:
                 train_acc, train_loss = train_epoch(
                     model, train_loader, optimizer, scheduler, criterion_train, 
-                    device
+                    device, epoch
                 )
+                
+                # 在每個 epoch 後調用 scheduler.step()，而不是在每個 batch 後
+                scheduler.step(epoch)
+                logger.info(f"Learning rate updated: {optimizer.param_groups[0]['lr']:.6f}")
             except Exception as e:
                 logger.error(f"Error during training epoch: {e}")
                 logger.error(traceback.format_exc())
