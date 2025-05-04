@@ -106,34 +106,25 @@ class SwinTransformerV2Classifier(nn.Module):
         """前向傳播函數"""
         features = self.backbone(x)
         
-        # 確保所有的特徵都參與計算，避免 DDP 中的未使用參數問題
-        # 方法1：將所有特徵加總在一起，確保所有參數都有梯度流動
-        all_features = features[-1]
-        if self.training:  # 只在訓練模式下進行參數強制使用
-            # 添加一個極小的縮放因子，使所有特徵參與計算但不影響結果
-            for i in range(len(features) - 1):
-                # 對每個特徵應用全局平均池化以獲得相同形狀的張量
-                f = features[i]
-                if f.dim() == 4:  # 針對空間特徵 (B, C, H, W)
-                    f = f.mean(dim=[2, 3])  # 變成 (B, C)
-                elif f.dim() == 3:  # 針對序列特徵 (B, L, C)
-                    f = f.mean(dim=1)  # 變成 (B, C)
-                
-                # 添加一個極小的貢獻，確保梯度流動但不影響結果
-                if all_features.dim() == 3:  # 如果主要特徵是 (B, L, C)
-                    # 調整維度與主要特徵一致
-                    f = f.unsqueeze(1).expand(-1, all_features.size(1), -1)
-                    # 使用極小因子縮放
-                    all_features = all_features + 0.000001 * f
-                else:  # 如果主要特徵是 (B, C, H, W) 或 (B, C)
-                    # 根據維度進行調整
-                    if all_features.dim() >= 3:
-                        # 將f廣播到適當維度
-                        f = f.view(f.size(0), f.size(1), 1, 1)
-                    all_features = all_features + 0.000001 * f
+        # 直接使用最後一層特徵進行分類
+        x = features[-1]
         
-        # 使用處理後的特徵進行分類
-        x = all_features
+        # 如果是訓練模式，我們添加一個偽損失，確保所有參數都參與計算
+        if self.training:
+            # 計算一個虛擬損失，確保所有特徵都參與計算
+            pseudo_loss = 0
+            for i in range(len(features)):
+                # 對每個特徵應用全局平均池化得到單一值
+                f = features[i]
+                if f.dim() >= 3:  # 特徵維度 >= 3
+                    # 全局平均池化到標量值，避免維度不匹配問題
+                    pooled_f = f.mean()
+                    # 使用極小係數創建偽損失
+                    pseudo_loss = pseudo_loss + 0.000001 * pooled_f
+            
+            # 將偽損失添加到主要特徵上，但不影響實際分類結果
+            # 乘以0然後加回，這樣不會影響前向傳播結果，但會確保所有參數都接收梯度
+            x = x + pseudo_loss * 0.0
         
         # 如果使用avgpool，則使用自定義頭部處理
         if self.use_avgpool:
