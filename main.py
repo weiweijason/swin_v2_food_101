@@ -93,7 +93,7 @@ timeout_handler = NCCLTimeoutHandler()
 
 # 添加檢查確保圖像尺寸與窗口尺寸相容
 def check_img_size_compatibility(img_size, window_size):
-    if img_size % window_size != 0:
+    if (img_size % window_size) != 0:
         print(f"WARNING: img_size {img_size} is not divisible by window_size {window_size}")
         new_img_size = (img_size // window_size) * window_size
         print(f"Adjusting img_size to {new_img_size}")
@@ -563,6 +563,18 @@ if __name__ == "__main__":
             dropout_path=0.2  # 增加dropout以減少過擬合
         )
         
+        # 對 checkpoint 功能進行設置
+        # 手動設置 torch.utils.checkpoint 的參數
+        if hasattr(torch.utils, 'checkpoint'):
+            # 修補 checkpoint 函數以默認使用 use_reentrant=False
+            original_checkpoint = torch.utils.checkpoint.checkpoint
+            def patched_checkpoint(*args, **kwargs):
+                if 'use_reentrant' not in kwargs:
+                    kwargs['use_reentrant'] = False
+                return original_checkpoint(*args, **kwargs)
+            torch.utils.checkpoint.checkpoint = patched_checkpoint
+            logger.info("已修補 torch.utils.checkpoint 函數，設置 use_reentrant=False")
+
         model = model.to(device)
         
         # 從頭開始訓練，不使用預訓練權重

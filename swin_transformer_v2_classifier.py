@@ -50,6 +50,11 @@ class SwinTransformerV2Classifier(nn.Module):
             use_checkpoint=use_checkpoint
         )
 
+        # 設置靜態圖，避免在分散式訓練中重複標記參數
+        if use_checkpoint:
+            self.backbone._set_static_graph(True)
+            print("已啟用靜態圖模式，以解決 checkpoint 中的參數重用問題")
+
         # 獲取backbone最後一層特徵的維度
         backbone_output_dim = embed_dim * 2 ** (len(depths) - 1)
         
