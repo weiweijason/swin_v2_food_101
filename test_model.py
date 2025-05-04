@@ -82,23 +82,27 @@ def main():
     
     # 載入模型權重
     try:
-        state_dict = torch.load(args.weights, map_location=device)
-        model.load_state_dict(state_dict)
-        logger.info(f"成功載入模型權重")
+        state_dict = torch.load(args.weights, map_location=device, weights_only=True)
+        
+        # 檢查並修正狀態字典中可能的問題
+        if 'norm_3d.weight' in state_dict:
+            # 為模型創建 norm_3d 參數，以匹配已保存的權重
+            model.norm_3d = nn.LayerNorm(model.head[0].in_features).to(device)
+            # 如果使用 DDP 訓練，移除 'module.' 前綴
+            if list(state_dict.keys())[0].startswith('module.'):
+                from collections import OrderedDict
+                new_state_dict = OrderedDict()
+                for k, v in state_dict.items():
+                    name = k[7:] if k.startswith('module.') else k
+                    new_state_dict[name] = v
+                state_dict = new_state_dict
+                
+        # 使用嚴格=False載入，允許忽略不匹配的鍵
+        model.load_state_dict(state_dict, strict=False)
+        logger.info(f"成功載入模型權重，部分參數可能被忽略")
     except Exception as e:
         logger.error(f"載入模型權重時發生錯誤: {e}")
-        # 嘗試載入 DDP 模型權重
-        try:
-            from collections import OrderedDict
-            new_state_dict = OrderedDict()
-            for k, v in state_dict.items():
-                name = k[7:] if k.startswith('module.') else k  # 移除 'module.' 前綴
-                new_state_dict[name] = v
-            model.load_state_dict(new_state_dict)
-            logger.info(f"成功載入 DDP 模型權重")
-        except Exception as e:
-            logger.error(f"載入 DDP 模型權重時也發生錯誤: {e}")
-            return
+        return
     
     model = model.to(device)
     model.eval()
