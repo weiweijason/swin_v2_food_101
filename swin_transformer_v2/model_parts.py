@@ -114,6 +114,21 @@ def window_partition(x, window_size):
         windows: (num_windows*B, window_size, window_size, C)
     """
     B, H, W, C = x.shape
+    
+    # 檢查輸入尺寸是否為窗口大小的整數倍，如果不是，則進行填充
+    pad_h = (window_size - H % window_size) % window_size
+    pad_w = (window_size - W % window_size) % window_size
+    
+    if pad_h > 0 or pad_w > 0:
+        # 進行填充以確保尺寸是窗口大小的整數倍
+        x = F.pad(x, (0, 0, 0, pad_w, 0, pad_h))
+        # 更新填充後的尺寸
+        _, H, W, _ = x.shape
+    
+    # 確保尺寸能被窗口大小整除
+    assert H % window_size == 0 and W % window_size == 0, f"特徵圖尺寸 ({H}x{W}) 必須能被窗口大小 {window_size} 整除"
+    
+    # 將特徵圖分割為窗口
     x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
     windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
     return windows
