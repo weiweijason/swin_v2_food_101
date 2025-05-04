@@ -564,16 +564,22 @@ if __name__ == "__main__":
         )
         
         # 對 checkpoint 功能進行設置
-        # 手動設置 torch.utils.checkpoint 的參數
+        # 手動修補 torch.utils.checkpoint 函數以避免重入問題
         if hasattr(torch.utils, 'checkpoint'):
-            # 修補 checkpoint 函數以默認使用 use_reentrant=False
+            # 嘗試直接替換 checkpoint 函數中的 use_reentrant 參數默認值
+            import inspect
+            
             original_checkpoint = torch.utils.checkpoint.checkpoint
+            
+            # 創建一個新的包裝函數，強制設置 use_reentrant=False
             def patched_checkpoint(*args, **kwargs):
                 if 'use_reentrant' not in kwargs:
                     kwargs['use_reentrant'] = False
                 return original_checkpoint(*args, **kwargs)
+            
+            # 替換原始函數
             torch.utils.checkpoint.checkpoint = patched_checkpoint
-            logger.info("已修補 torch.utils.checkpoint 函數，設置 use_reentrant=False")
+            logger.info("已修補 torch.utils.checkpoint 函數，設置 use_reentrant=False 以解決重入問題")
 
         model = model.to(device)
         
