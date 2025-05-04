@@ -117,20 +117,17 @@ class SwinTransformerV2Classifier(nn.Module):
         # 使用最後一層特徵進行分類
         x = features[-1]
         
-        # 檢查是否在DDP模式下，基於模塊包裝情況判斷
-        if not hasattr(self, 'in_ddp_mode'):
-            self.in_ddp_mode = False
+        # 強制所有參數接收梯度 - 即使在測試模式下也保持活躍
+        # 創建一個非常小的虛擬損失，不影響實際結果但確保梯度流動
+        dummy_loss = 0.0
+        for i, p in enumerate(self.parameters()):
+            # 只處理需要梯度的參數
+            if p.requires_grad:
+                # 使用參數的均值乘以一個極小數添加到損失中
+                dummy_loss = dummy_loss + 0.0 * torch.mean(p)
         
-        # 如果在訓練模式且使用DDP，添加所有參數的虛擬梯度流
-        if self.training and self.in_ddp_mode:
-            # 創建一個極小的虛擬損失，確保所有參數都有梯度流動
-            # 這個損失對最終結果沒有實際影響
-            dummy_loss = 0.0
-            for param in self._param_list:
-                dummy_loss = dummy_loss + 0.0 * param.sum()
-            
-            # 將虛擬損失添加到特徵中
-            x = x + dummy_loss
+        # 將虛擬損失添加到最終輸出
+        x = x + dummy_loss
         
         # 如果使用avgpool，則使用自定義頭部處理
         if self.use_avgpool:
