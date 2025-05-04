@@ -33,22 +33,18 @@ class SwinTransformerV2Classifier(nn.Module):
         self.backbone = SwinTransformerV2(
             input_resolution=input_resolution,
             patch_size=patch_size, 
-            in_chans=3, 
-            num_classes=num_classes if not use_avgpool else 0,  # 若使用avgpool則num_classes設為0
-            embed_dim=embed_dim, 
+            in_channels=3,  # 修正參數名稱：in_chans -> in_channels
+            embedding_channels=embed_dim,  # 修正參數名稱：embed_dim -> embedding_channels
             depths=depths, 
-            num_heads=num_heads, 
+            number_of_heads=num_heads,  # 修正參數名稱：num_heads -> number_of_heads
             window_size=window_size, 
-            mlp_ratio=mlp_ratio, 
-            qkv_bias=qkv_bias, 
-            drop_rate=drop_rate, 
-            attn_drop_rate=attn_drop_rate, 
-            drop_path_rate=dropout_path,  # 使用較高的dropout_path防止過擬合
-            norm_layer=norm_layer, 
-            ape=ape, 
-            patch_norm=patch_norm, 
-            use_checkpoint=use_checkpoint,
-            pretrained_window_sizes=[12, 12, 12, 6]  # 使用預訓練window size參數
+            ff_feature_ratio=mlp_ratio,  # 修正參數名稱：mlp_ratio -> ff_feature_ratio
+            dropout=drop_rate,  # 修正參數名稱：drop_rate -> dropout
+            dropout_attention=attn_drop_rate,  # 修正參數名稱：attn_drop_rate -> dropout_attention
+            dropout_path=dropout_path,  # 參數名稱正確
+            use_checkpoint=use_checkpoint  # 參數名稱正確
+            # 移除不支援的參數
+            # ape, patch_norm, pretrained_window_sizes
         )
 
         # 獲取backbone最後一層特徵的維度
