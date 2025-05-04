@@ -326,7 +326,7 @@ def visualize_cam(image, cam):
 
 
 # Main Program
-if __name__ == "___main__":
+if __name__ == "__main__":
     # NOTE: The process group is initialized by torchrun automatically
     # DO NOT initialize it again with torch.distributed.init_process_group()
     
