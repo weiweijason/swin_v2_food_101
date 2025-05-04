@@ -22,7 +22,7 @@ def main():
     測試 Swin Transformer V2 模型的主函數
     """
     parser = argparse.ArgumentParser(description='測試 Swin Transformer V2 模型')
-    parser.add_argument('--weights', type=str, default='outputs/swinv2_food101_best.pth', 
+    parser.add_argument('--weights', type=str, default='swinv2_food101_best.pth', 
                          help='模型權重檔案路徑')
     parser.add_argument('--image_size', type=int, default=224, 
                          help='輸入圖像大小')
