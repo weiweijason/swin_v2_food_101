@@ -140,14 +140,34 @@ def window_reverse(windows, window_size, H, W):
     Args:
         windows: (num_windows*B, window_size, window_size, C)
         window_size (int): 窗口大小
-        H (int): 高度
-        W (int): 寬度
+        H (int): 原始高度
+        W (int): 原始寬度
     Returns:
         x: (B, H, W, C)
     """
-    B = int(windows.shape[0] / (H * W / window_size / window_size))
-    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
-    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
+    # 計算填充後的尺寸（確保是窗口大小的整數倍）
+    pad_h = (window_size - H % window_size) % window_size
+    pad_w = (window_size - W % window_size) % window_size
+    
+    # 填充後的高度和寬度
+    padded_H, padded_W = H + pad_h, W + pad_w
+    
+    # 計算每個維度的窗口數量
+    h_windows = padded_H // window_size
+    w_windows = padded_W // window_size
+    
+    # 計算批次大小
+    B = int(windows.shape[0] / (h_windows * w_windows))
+    
+    # 重塑窗口為填充後的特徵圖
+    x = windows.view(B, h_windows, w_windows, window_size, window_size, -1)
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
+    x = x.view(B, padded_H, padded_W, -1)
+    
+    # 如果有填充，移除填充部分
+    if pad_h > 0 or pad_w > 0:
+        x = x[:, :H, :W, :]
+    
     return x
 
 
