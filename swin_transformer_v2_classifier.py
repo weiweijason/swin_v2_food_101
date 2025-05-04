@@ -28,23 +28,26 @@ class SwinTransformerV2Classifier(nn.Module):
         super().__init__()
         self.num_classes = num_classes
         self.use_avgpool = use_avgpool
+        # 是否使用DDP模式（將在前向傳播中檢測）
+        self.in_ddp_mode = False
+        
+        # 記錄參數列表，用於DDP訓練
+        self._param_list = []
 
         # 建立 Swin Transformer V2 骨幹
         self.backbone = SwinTransformerV2(
             input_resolution=input_resolution,
             patch_size=patch_size, 
-            in_channels=3,  # 修正參數名稱：in_chans -> in_channels
-            embedding_channels=embed_dim,  # 修正參數名稱：embed_dim -> embedding_channels
+            in_channels=3,
+            embedding_channels=embed_dim,
             depths=depths, 
-            number_of_heads=num_heads,  # 修正參數名稱：num_heads -> number_of_heads
+            number_of_heads=num_heads,
             window_size=window_size, 
-            ff_feature_ratio=mlp_ratio,  # 修正參數名稱：mlp_ratio -> ff_feature_ratio
-            dropout=drop_rate,  # 修正參數名稱：drop_rate -> dropout
-            dropout_attention=attn_drop_rate,  # 修正參數名稱：attn_drop_rate -> dropout_attention
-            dropout_path=dropout_path,  # 參數名稱正確
-            use_checkpoint=use_checkpoint  # 參數名稱正確
-            # 移除不支援的參數
-            # ape, patch_norm, pretrained_window_sizes
+            ff_feature_ratio=mlp_ratio,
+            dropout=drop_rate,
+            dropout_attention=attn_drop_rate,
+            dropout_path=dropout_path,
+            use_checkpoint=use_checkpoint
         )
 
         # 獲取backbone最後一層特徵的維度
@@ -71,6 +74,11 @@ class SwinTransformerV2Classifier(nn.Module):
             print(f"分類頭最後一層輸出大小：{num_classes}")
         else:
             self.head = nn.Identity()
+            
+        # 註冊參數掛鉤，用於DDP訓練
+        for name, param in self.named_parameters():
+            self._param_list.append(param)
+        print(f"初始化完成，模型共有 {len(self._param_list)} 個參數")
         
         # 載入預訓練權重
         if pretrained is not None:
@@ -106,25 +114,23 @@ class SwinTransformerV2Classifier(nn.Module):
         """前向傳播函數"""
         features = self.backbone(x)
         
-        # 直接使用最後一層特徵進行分類
+        # 使用最後一層特徵進行分類
         x = features[-1]
         
-        # 如果是訓練模式，我們添加一個偽損失，確保所有參數都參與計算
-        if self.training:
-            # 計算一個虛擬損失，確保所有特徵都參與計算
-            pseudo_loss = 0
-            for i in range(len(features)):
-                # 對每個特徵應用全局平均池化得到單一值
-                f = features[i]
-                if f.dim() >= 3:  # 特徵維度 >= 3
-                    # 全局平均池化到標量值，避免維度不匹配問題
-                    pooled_f = f.mean()
-                    # 使用極小係數創建偽損失
-                    pseudo_loss = pseudo_loss + 0.000001 * pooled_f
+        # 檢查是否在DDP模式下，基於模塊包裝情況判斷
+        if not hasattr(self, 'in_ddp_mode'):
+            self.in_ddp_mode = False
+        
+        # 如果在訓練模式且使用DDP，添加所有參數的虛擬梯度流
+        if self.training and self.in_ddp_mode:
+            # 創建一個極小的虛擬損失，確保所有參數都有梯度流動
+            # 這個損失對最終結果沒有實際影響
+            dummy_loss = 0.0
+            for param in self._param_list:
+                dummy_loss = dummy_loss + 0.0 * param.sum()
             
-            # 將偽損失添加到主要特徵上，但不影響實際分類結果
-            # 乘以0然後加回，這樣不會影響前向傳播結果，但會確保所有參數都接收梯度
-            x = x + pseudo_loss * 0.0
+            # 將虛擬損失添加到特徵中
+            x = x + dummy_loss
         
         # 如果使用avgpool，則使用自定義頭部處理
         if self.use_avgpool:

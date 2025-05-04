@@ -339,6 +339,9 @@ if __name__ == "__main__":
         torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
         
+        # 設置分散式調試環境變數，幫助識別未使用的參數
+        os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
+        
         # 初始化超時處理器
         timeout_handler.set_rank(local_rank)
         
@@ -572,6 +575,10 @@ if __name__ == "__main__":
             find_unused_parameters=True,  # 啟用未使用參數檢測以解決DDP訓練問題
             broadcast_buffers=False  # 保持關閉緩衝區廣播以減少通信量
         )
+
+        # 設置模型為 DDP 模式，啟用虛擬損失以解決未使用參數問題
+        model.module.in_ddp_mode = True
+        logger.info("已啟用 DDP 模式的虛擬損失機制，確保所有參數參與梯度計算")
         
         # 禁用可能與分散式訓練衝突的優化選項
         if hasattr(torch, '_dynamo'):
