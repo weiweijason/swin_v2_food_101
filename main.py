@@ -51,7 +51,12 @@ except RuntimeError:
     pass
 
 # Import the SwinV2 classifier
-from swin_transformer_v2_classifier import swin_transformer_v2_base_classifier
+from swin_transformer_v2_classifier import (
+    swin_transformer_v2_base_classifier,
+    swin_transformer_v2_tiny_classifier,
+    swin_transformer_v2_small_classifier,
+    swin_transformer_v2_large_classifier
+)
 
 # 設置全局超時處理機制
 class NCCLTimeoutHandler:
@@ -369,19 +374,19 @@ if __name__ == "__main__":
         except Exception as e:
             logger.warning(f"Initial synchronization failed: {e}")
 
-        # 更新參數設置 - 從頭訓練優化設定
-        BATCH_SIZE = 32  # 降低批次大小，使訓練更穩定
-        IMAGE_SIZE = 224  # 降低圖像大小，減少計算量
-        WINDOW_SIZE = 7  # 確保與圖像大小匹配的窗口大小
-        NUM_EPOCHS = 100  # 減少訓練輪數，因為使用預訓練權重後收斂更快
+        # 更新參數設置 - 符合指定的 Swin V2 Large 模型需求
+        BATCH_SIZE = 16  # 對於大型模型降低批次大小
+        IMAGE_SIZE = 192  # 按照用戶要求設置為 192
+        WINDOW_SIZE = 12  # 按照用戶要求設置為 12
+        NUM_EPOCHS = 50  # 減少訓練輪數，因為使用預訓練權重後收斂更快
         IMAGE_ROOT = "food-101/images"
         TRAIN_FILE = "food-101/meta/train.txt"
         TEST_FILE = "food-101/meta/test.txt"
-        GRAD_ACCUM_STEPS = 2  # 減少梯度累積步驟，降低數值不穩定性
-        WARMUP_EPOCHS = 5  # 縮短預熱期，使用預訓練權重不需要太長的預熱
+        GRAD_ACCUM_STEPS = 2
+        WARMUP_EPOCHS = 5
 
-        # 使用預訓練權重路徑
-        PRETRAINED_WEIGHTS = "outputs/pretrained/swinv2_base_patch4_window12to16_192to256.pth"
+        # 設置預訓練權重路徑為指定的 large 模型
+        PRETRAINED_WEIGHTS = "swinv2_large_patch4_window12_192_22k.pth"
 
         LABELS = [
             'apple_pie',
@@ -487,17 +492,13 @@ if __name__ == "__main__":
             'waffles'
         ]
 
-        # 更新訓練集增強策略，減少強度以提高穩定性
+        # 更新訓練集增強策略，簡化以更接近 V1 版本
         train_transform = transforms.Compose([
-            transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),  # 簡化調整大小操作
-            transforms.RandomCrop(IMAGE_SIZE, padding=32, padding_mode='reflect'),  # 使用邊界填充的隨機裁剪
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),  # 降低色彩抖動強度
-            RandAugment(num_ops=1, magnitude=3),  # 顯著降低RandAugment強度
+            transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+            transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                std=[0.229, 0.224, 0.225]),
-            RandomErasing(p=0.1, scale=(0.02, 0.2), ratio=(0.3, 3.3), value=0, inplace=False),  # 進一步降低RandomErasing強度
+                                std=[0.229, 0.224, 0.225])
         ])
 
         # 測試集轉換保持簡單
@@ -555,14 +556,64 @@ if __name__ == "__main__":
             persistent_workers=True
         )
 
-        # 初始化 SwinV2 模型，使用容錯性更高的配置
-        model = swin_transformer_v2_base_classifier(
-            input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
-            window_size=WINDOW_SIZE,  # 保持窗口大小與圖像尺寸兼容
-            num_classes=len(LABELS),
-            use_checkpoint=True,  # 使用checkpoint可以減少內存使用但增加計算
-            dropout_path=0.2  # 增加dropout以減少過擬合
-        )
+        # 模型規格選擇 (可選: 'tiny', 'small', 'base', 'large')
+        MODEL_SIZE = "large"  # 默認使用 large 模型
+
+        # 根據模型規格和圖像尺寸調整窗口大小
+        if MODEL_SIZE == "large":
+            # large 模型需要更多顯存，可能需要降低批次大小
+            BATCH_SIZE = 16
+        elif MODEL_SIZE == "tiny":
+            # tiny 模型較輕量，可以使用更大的批次大小
+            BATCH_SIZE = 64
+        else:
+            # small 或 base 模型使用默認批次大小
+            BATCH_SIZE = 32
+
+        # 根據選定的模型規格初始化不同的 SwinV2 模型
+        logger.info(f"使用 {MODEL_SIZE} 規格的 Swin Transformer V2 模型")
+        
+        if MODEL_SIZE == "tiny":
+            model = swin_transformer_v2_tiny_classifier(
+                input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
+                window_size=WINDOW_SIZE,
+                num_classes=len(LABELS),
+                use_checkpoint=True,
+                dropout_path=0.2
+            )
+        elif MODEL_SIZE == "small":
+            model = swin_transformer_v2_small_classifier(
+                input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
+                window_size=WINDOW_SIZE,
+                num_classes=len(LABELS),
+                use_checkpoint=True,
+                dropout_path=0.2
+            )
+        elif MODEL_SIZE == "large":
+            model = swin_transformer_v2_large_classifier(
+                input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
+                window_size=WINDOW_SIZE,
+                num_classes=len(LABELS),
+                use_checkpoint=True,
+                dropout_path=0.2
+            )
+        else:  # 默認使用 base 模型
+            model = swin_transformer_v2_base_classifier(
+                input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
+                window_size=WINDOW_SIZE,
+                num_classes=len(LABELS),
+                use_checkpoint=True,
+                dropout_path=0.2
+            )
+
+        # 使用預訓練權重
+        if os.path.exists(PRETRAINED_WEIGHTS):
+            logger.info(f"載入預訓練權重: {PRETRAINED_WEIGHTS}")
+            model.load_pretrained(PRETRAINED_WEIGHTS)
+        else:
+            logger.warning(f"預訓練權重文件 {PRETRAINED_WEIGHTS} 不存在，將從頭開始訓練")
+
+        model = model.to(device)
         
         # 對 checkpoint 功能進行設置
         # 手動修補 torch.utils.checkpoint 函數以避免重入問題
@@ -584,8 +635,8 @@ if __name__ == "__main__":
 
         model = model.to(device)
         
-        # 從頭開始訓練，不使用預訓練權重
-        logger.info("從頭開始訓練模型，不使用預訓練權重")
+        # 使用預訓練權重進行模型初始化
+        logger.info(f"使用 {PRETRAINED_WEIGHTS} 預訓練權重進行模型初始化")
         
         # 使用 DDP 包裝模型
         model = nn.parallel.DistributedDataParallel(
@@ -607,11 +658,11 @@ if __name__ == "__main__":
             torch._dynamo.config.suppress_errors = True
             torch._dynamo.config.cache_size_limit = 32  # 限制快取大小
         
-        # 優化器設置 - 使用更適合從頭訓練的配置
+        # 優化器設置 - 使用更適合微調的配置 (非從頭訓練)
         optimizer = optim.AdamW(
             model.parameters(),
-            lr=1e-3,  # 大幅提高初始學習率，從頭訓練時需要更大的學習率
-            weight_decay=0.01,  # 降低權重衰減，從頭訓練時過大的衰減會阻礙收斂
+            lr=2e-5,  # 將學習率降低到與 V1 版本一致
+            weight_decay=0.05,  # 輕微提高權重衰減以增強正則化
             eps=1e-8,  # 保持較高的epsilon值提高數值穩定性
             betas=(0.9, 0.999)  # 默認動量參數
         )

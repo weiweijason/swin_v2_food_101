@@ -182,3 +182,81 @@ def swin_transformer_v2_base_classifier(input_resolution: Tuple[int, int] = (224
     print(f"SwinV2 Classifier 初始化完成: 圖像尺寸={input_resolution}, 窗口大小={window_size}, 類別數={num_classes}")
     
     return model
+
+def swin_transformer_v2_tiny_classifier(input_resolution: Tuple[int, int] = (224, 224),
+                                     window_size: int = 7,
+                                     in_channels: int = 3,
+                                     num_classes: int = 1000,
+                                     use_checkpoint: bool = False,
+                                     sequential_self_attention: bool = False,
+                                     dropout_path: float = 0.2) -> SwinTransformerV2Classifier:
+    """
+    Creates a Swin Transformer V2 Tiny model for classification
+    """
+    model = SwinTransformerV2Classifier(
+        input_resolution=input_resolution,
+        window_size=window_size,
+        num_classes=num_classes,
+        depths=(2, 2, 6, 2),
+        embed_dim=96,
+        num_heads=[3, 6, 12, 24],
+        dropout_path=dropout_path,
+        use_checkpoint=use_checkpoint,
+        drop_rate=0.1
+    )
+    
+    print(f"SwinV2 Tiny Classifier 初始化完成: 圖像尺寸={input_resolution}, 窗口大小={window_size}, 類別數={num_classes}")
+    
+    return model
+
+def swin_transformer_v2_small_classifier(input_resolution: Tuple[int, int] = (224, 224),
+                                      window_size: int = 7,
+                                      in_channels: int = 3,
+                                      num_classes: int = 1000,
+                                      use_checkpoint: bool = False,
+                                      sequential_self_attention: bool = False,
+                                      dropout_path: float = 0.2) -> SwinTransformerV2Classifier:
+    """
+    Creates a Swin Transformer V2 Small model for classification
+    """
+    model = SwinTransformerV2Classifier(
+        input_resolution=input_resolution,
+        window_size=window_size,
+        num_classes=num_classes,
+        depths=(2, 2, 18, 2),
+        embed_dim=96,
+        num_heads=[3, 6, 12, 24],
+        dropout_path=dropout_path,
+        use_checkpoint=use_checkpoint,
+        drop_rate=0.1
+    )
+    
+    print(f"SwinV2 Small Classifier 初始化完成: 圖像尺寸={input_resolution}, 窗口大小={window_size}, 類別數={num_classes}")
+    
+    return model
+
+def swin_transformer_v2_large_classifier(input_resolution: Tuple[int, int] = (224, 224),
+                                       window_size: int = 7,
+                                       in_channels: int = 3,
+                                       num_classes: int = 1000,
+                                       use_checkpoint: bool = False,
+                                       sequential_self_attention: bool = False,
+                                       dropout_path: float = 0.2) -> SwinTransformerV2Classifier:
+    """
+    Creates a Swin Transformer V2 Large model for classification
+    """
+    model = SwinTransformerV2Classifier(
+        input_resolution=input_resolution,
+        window_size=window_size,
+        num_classes=num_classes,
+        depths=(2, 2, 18, 2),
+        embed_dim=192,
+        num_heads=[6, 12, 24, 48],
+        dropout_path=dropout_path,
+        use_checkpoint=use_checkpoint,
+        drop_rate=0.1
+    )
+    
+    print(f"SwinV2 Large Classifier 初始化完成: 圖像尺寸={input_resolution}, 窗口大小={window_size}, 類別數={num_classes}")
+    
+    return model
