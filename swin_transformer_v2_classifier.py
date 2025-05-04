@@ -102,7 +102,10 @@ class SwinTransformerV2Classifier(nn.Module):
 
     def forward(self, x):
         """前向傳播函數"""
-        x = self.backbone(x)
+        features = self.backbone(x)
+        
+        # 從 features 列表中獲取最後一層特徵（通常是最高級別的特徵）
+        x = features[-1]  # 取出最後一個特徵圖
         
         # 如果使用avgpool，則使用自定義頭部處理
         if self.use_avgpool:
