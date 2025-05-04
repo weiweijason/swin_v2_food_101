@@ -106,8 +106,34 @@ class SwinTransformerV2Classifier(nn.Module):
         """前向傳播函數"""
         features = self.backbone(x)
         
-        # 從 features 列表中獲取最後一層特徵（通常是最高級別的特徵）
-        x = features[-1]  # 取出最後一個特徵圖
+        # 確保所有的特徵都參與計算，避免 DDP 中的未使用參數問題
+        # 方法1：將所有特徵加總在一起，確保所有參數都有梯度流動
+        all_features = features[-1]
+        if self.training:  # 只在訓練模式下進行參數強制使用
+            # 添加一個極小的縮放因子，使所有特徵參與計算但不影響結果
+            for i in range(len(features) - 1):
+                # 對每個特徵應用全局平均池化以獲得相同形狀的張量
+                f = features[i]
+                if f.dim() == 4:  # 針對空間特徵 (B, C, H, W)
+                    f = f.mean(dim=[2, 3])  # 變成 (B, C)
+                elif f.dim() == 3:  # 針對序列特徵 (B, L, C)
+                    f = f.mean(dim=1)  # 變成 (B, C)
+                
+                # 添加一個極小的貢獻，確保梯度流動但不影響結果
+                if all_features.dim() == 3:  # 如果主要特徵是 (B, L, C)
+                    # 調整維度與主要特徵一致
+                    f = f.unsqueeze(1).expand(-1, all_features.size(1), -1)
+                    # 使用極小因子縮放
+                    all_features = all_features + 0.000001 * f
+                else:  # 如果主要特徵是 (B, C, H, W) 或 (B, C)
+                    # 根據維度進行調整
+                    if all_features.dim() >= 3:
+                        # 將f廣播到適當維度
+                        f = f.view(f.size(0), f.size(1), 1, 1)
+                    all_features = all_features + 0.000001 * f
+        
+        # 使用處理後的特徵進行分類
+        x = all_features
         
         # 如果使用avgpool，則使用自定義頭部處理
         if self.use_avgpool:
