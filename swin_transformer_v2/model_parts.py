@@ -659,7 +659,9 @@ class SwinTransformerBlock(nn.Module):
             x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
         else:
             x = shifted_x
-        x = x.view(B, H * W, C)
+            
+        # 使用 reshape 代替 view 以避免非連續內存錯誤
+        x = x.reshape(B, H * W, C)
         
         # FFN，使用 PreNorm 結構，加入 BatchNorm 增強從頭訓練的效果
         x = shortcut + self.drop_path(x)
