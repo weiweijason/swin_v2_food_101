@@ -65,8 +65,10 @@ class SwinTransformerV2Classifier(nn.Module):
                 nn.LayerNorm(backbone_output_dim // 4),
                 nn.GELU(),
                 nn.Dropout(0.2),
-                nn.Linear(backbone_output_dim // 4, num_classes)
+                nn.Linear(backbone_output_dim // 4, num_classes)  # 確保最後一層輸出大小為類別數量
             )
+            # 打印調試信息以確認輸出維度
+            print(f"分類頭最後一層輸出大小：{num_classes}")
         else:
             self.head = nn.Identity()
         

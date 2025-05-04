@@ -326,7 +326,7 @@ def visualize_cam(image, cam):
 
 
 # Main Program
-if __name__ == "__main__":
+if __name__ == "___main__":
     # NOTE: The process group is initialized by torchrun automatically
     # DO NOT initialize it again with torch.distributed.init_process_group()
     
@@ -589,12 +589,12 @@ if __name__ == "__main__":
         )
         
         # 使用適合從頭訓練的損失函數
-        # 從頭訓練時標籤平滑很重要，但平滑係數應該較小
-        base_criterion = LabelSmoothingCrossEntropy(smoothing=0.1)
-        
-        # 僅在訓練穩定後使用更複雜的損失函數
-        criterion_train = SoftTargetCrossEntropy() if mixup_fn else base_criterion
-        criterion_test = nn.CrossEntropyLoss()  # 測試時使用標準交叉熵
+        # 使用標準交叉熵損失而不是標籤平滑，以避免維度不匹配問題
+        base_criterion = nn.CrossEntropyLoss()
+
+        # 不使用 Mixup 和 SoftTargetCrossEntropy，改用標準損失函數
+        criterion_train = base_criterion
+        criterion_test = base_criterion
         
         # 使用更適合從頭訓練的調度器 - 更長的預熱和較慢的衰減
         scheduler = CosineLRScheduler(
