@@ -196,7 +196,8 @@ def main():
             img, label = test_dataset[idx]
             
             # 獲取原始圖像用於可視化
-            img_path = test_df.iloc[idx]['image_path']
+            img_path = test_df.iloc[idx]['path']  # 修改這裡，從 'image_path' 改為 'path'
+            
             original_img = Image.open(img_path).convert('RGB')
             
             # 生成 CAM
