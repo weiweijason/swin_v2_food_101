@@ -17,6 +17,62 @@ import cv2
 from swin_transformer_v2_classifier import swin_transformer_v2_base_classifier
 from main import Label_encoder, Food101Dataset, generate_cam_swin_v2, visualize_cam, setup_logger, prepare_dataframe
 
+def generate_cam_swin_v2_test(model, input_tensor, class_idx=None):
+    """
+    為非DDP模型生成Class Activation Map
+    :param model: 直接載入的SwinV2模型（非DDP模型）
+    :param input_tensor: 輸入圖像張量 [1, C, H, W]
+    :param class_idx: 目標類別索引（若為None則使用預測類別）
+    :return: CAM作為numpy陣列
+    """
+    # 確保輸入張量在正確的裝置上
+    device = next(model.parameters()).device
+    input_tensor = input_tensor.to(device)
+    
+    gradients = []
+    activations = []
+    
+    # 註冊鉤子以獲取梯度和啟動
+    def forward_hook(module, input, output):
+        activations.append(output)
+    
+    def backward_hook(module, grad_input, grad_output):
+        gradients.append(grad_output[0])
+    
+    # 在最後一個階段的最後一層上註冊鉤子
+    target_layer = model.backbone.stages[-1].blocks[-1]  # 移除 .module 前綴
+    handle_fwd = target_layer.register_forward_hook(forward_hook)
+    handle_bwd = target_layer.register_backward_hook(backward_hook)
+    
+    # 前向傳播
+    model.eval()
+    output = model(input_tensor)
+    if class_idx is None:
+        class_idx = output.argmax(dim=1).item()
+    
+    # 反向傳播
+    model.zero_grad()
+    output[:, class_idx].backward()
+    
+    # 獲取梯度和啟動
+    grad = gradients[0]
+    act = activations[0]
+    
+    # 計算權重
+    weights = grad.mean(dim=(2, 3), keepdim=True)
+    
+    # 生成CAM
+    cam = (weights * act).sum(dim=1, keepdim=True)
+    cam = torch.relu(cam)
+    cam = cam - cam.min()
+    cam = cam / (cam.max() + 1e-8)
+    
+    # 清理鉤子
+    handle_fwd.remove()
+    handle_bwd.remove()
+    
+    return cam[0, 0].detach().cpu().numpy()
+
 def main():
     """
     測試 Swin Transformer V2 模型的主函數
@@ -202,7 +258,7 @@ def main():
             
             # 生成 CAM
             img_tensor = img.unsqueeze(0).to(device)
-            cam = generate_cam_swin_v2(model, img_tensor)
+            cam = generate_cam_swin_v2_test(model, img_tensor)  # 使用新的非DDP版本的函數
             
             # 重設原始圖像大小以匹配 CAM
             original_img = original_img.resize((args.image_size, args.image_size))
