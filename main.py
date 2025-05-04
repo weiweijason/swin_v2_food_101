@@ -103,7 +103,7 @@ def check_img_size_compatibility(img_size, window_size):
 # 設置日誌格式
 def setup_logger(local_rank):
     # 創建日誌格式
-    log_format = '%(asctime)s - %(levelname)s - Rank[%(rank)s] - %(message)s'
+    log_format = '%(asctime)s - %(levellevel)s - Rank[%(rank)s] - %(message)s'
     date_format = '%Y-%m-%d %H:%M:%S'
     
     # 創建一個自定義的過濾器，添加rank信息
@@ -182,24 +182,11 @@ class Food101Dataset(Dataset):
         label = self.dataframe.iloc[idx]['label']
         label = self.encoder.get_idx(label)
 
-        # 增加更強大的錯誤處理和圖像讀取重試機制
-        for attempt in range(3):  # 重試3次
-            try:
-                image = Image.open(img_path).convert("RGB")
-                if self.transform:
-                    image = self.transform(image)
-                return image, label
-            except Exception as e:
-                if attempt < 2:  # 如果這不是最後一次重試
-                    time.sleep(0.1)  # 短暫等待
-                    continue
-                else:
-                    print(f"Error loading image {img_path}: {e}")
-                    # 返回一個與訓練設置相符的隨機圖像而不是拋出異常
-                    dummy_image = torch.randn(3, 224, 224)
-                    # 歸一化隨機張量使其統計特性與實際圖像更接近
-                    dummy_image = (dummy_image - dummy_image.mean()) / dummy_image.std()
-                    return dummy_image, label
+        image = Image.open(img_path).convert("RGB")
+        if self.transform:
+            image = self.transform(image)
+
+        return image, label
 
 
 # Updated prepare_dataframe function
@@ -211,273 +198,61 @@ def prepare_dataframe(file_path, image_root, encoder):
     for line in lines:
         category, img_name = line.split('/')
         if category in encoder.labels:
-            img_path = f"{image_root}/{category}/{img_name}.jpg"
-            # 檢查文件是否存在
-            if os.path.exists(img_path):
-                data.append({
-                    'label': category,
-                    'path': img_path
-                })
+            data.append({
+                'label': category,
+                'path': f"{image_root}/{category}/{img_name}.jpg"
+            })
 
     df = pd.DataFrame(data)
     return shuffle(df)
 
 
-# 訓練 Function with Mixup and Cutmix
-def train_epoch_amp(model, dataloader, optimizer, scheduler, criterion, device, scaler, epoch, logger, mixup_fn=None, gradient_accumulation_steps=4):
-    """
-    使用混合精度訓練的訓練函數，可加速訓練並降低記憶體使用量
-    包含 Mixup、Cutmix 及梯度累積支援
-    """
+# Training and Testing Functions
+def train_epoch(model, dataloader, optimizer, scheduler, criterion, device):
     model.train()
     total_loss = 0
     correct = 0
     total = 0
-    
-    # 追蹤 Mixup 準確率的變數
-    mixup_correct = 0
-    mixup_total = 0
-    
-    nan_detected = False
-    batch_processed = 0  # 追蹤成功處理的批次數量
-    consecutive_nan_count = 0  # 計算連續出現NaN的次數
-    timeout_count = 0  # 計算可能的超時批次數
 
-    # 重設優化器，確保每個epoch開始時梯度為零
-    optimizer.zero_grad(set_to_none=True)
-    
-    # 追蹤累積步數
-    accumulation_counter = 0
-
-    for i, (inputs, targets) in enumerate(tqdm(dataloader, desc="Training")):
-        # 監控處理批次時間，以偵測潛在的超時問題
-        batch_start_time = time.time()
-        
+    for inputs, targets in tqdm(dataloader, desc="Training"):
         inputs, targets = inputs.to(device), targets.to(device)
-        
-        # 記錄原始標籤以計算近似準確率
-        if mixup_fn is not None:
-            original_targets = targets.clone()  # 在應用 mixup 前保存原始標籤
-            inputs, targets = mixup_fn(inputs, targets)
-        
-        # 使用混合精度前向傳播
-        with autocast():
-            outputs = model(inputs)
-            # 計算loss時除以累積步數，以保持梯度規模一致
-            loss = criterion(outputs, targets) / gradient_accumulation_steps
-        
-        # 檢查 loss 是否為 NaN
-        if torch.isnan(loss).any() or torch.isinf(loss).any():
-            logger.warning(f"NaN/Inf detected in loss at epoch {epoch}, batch {i}! Skipping this batch.")
-            nan_detected = True
-            consecutive_nan_count += 1
-            
-            # 連續出現多個NaN時降低學習率
-            if consecutive_nan_count >= 3:  # 降低連續NaN的閾值
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = param_group['lr'] * 0.5  # 顯著降低學習率到原來的50%
-                logger.warning(f"Reducing learning rate to {optimizer.param_groups[0]['lr']} due to consecutive NaNs")
-                consecutive_nan_count = 0  # 重置計數器
-                
-            continue
-        
-        # 如果沒有NaN，重置連續計數
-        consecutive_nan_count = 0
-        
-        # 使用GradScaler處理反向傳播
-        try:
-            scaler.scale(loss).backward()
-        except RuntimeError as e:
-            if "NCCL" in str(e) or "timeout" in str(e).lower():
-                logger.error(f"NCCL error during backward pass: {e}")
-                timeout_count += 1
-                if timeout_count >= 3:
-                    logger.critical("Too many NCCL errors, attempting recovery...")
-                    # 嘗試主動進行同步
-                    try:
-                        synchronize()
-                        timeout_count = 0
-                    except:
-                        logger.critical("Failed to synchronize processes, skipping batch")
-                continue
-            else:
-                logger.error(f"Error during backward pass: {e}")
-                continue
-        
-        # 更新梯度累積計數器
-        accumulation_counter += 1
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, targets)
+        loss.backward()
+        optimizer.step()
+        scheduler.step()
 
-        # 當達到指定的累積步數或是最後一個批次時，更新參數
-        is_last_batch = (i == len(dataloader) - 1)
-        if accumulation_counter == gradient_accumulation_steps or is_last_batch:
-            # 在更新前應用梯度裁剪 - 使用更小的閾值
-            try:
-                scaler.unscale_(optimizer)
-                # 使用更小的梯度裁剪閾值，可以提高穩定性
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            except RuntimeError as e:
-                logger.warning(f"RuntimeError during unscale_: {e}. Skipping this batch.")
-                optimizer.zero_grad(set_to_none=True)
-                accumulation_counter = 0
-                continue
-            
-            # 更新參數
-            try:
-                # 設置超時保護
-                timeout_handler.start()
-                scaler.step(optimizer)
-                # 操作完成，停止超時保護
-                timeout_handler.stop()
-                scaler.update()
-            except RuntimeError as e:
-                if "NCCL" in str(e) or "timeout" in str(e).lower():
-                    logger.error(f"NCCL error during optimizer step: {e}")
-                    timeout_count += 1
-                    if timeout_count >= 3:
-                        logger.critical("Too many NCCL errors, attempting recovery...")
-                        try:
-                            synchronize()
-                            timeout_count = 0
-                        except:
-                            pass
-                else:
-                    logger.error(f"Error during optimizer step: {e}")
-                optimizer.zero_grad(set_to_none=True)
-                accumulation_counter = 0
-                continue
-            
-            # 只計算成功更新的批次
-            total_loss += loss.item() * gradient_accumulation_steps  # 乘以累積步數恢復原始loss
-            
-            # 計算準確率
-            _, predicted = outputs.max(1)
-            
-            # 如果使用了 mixup，則計算近似準確率（與最大權重標籤比較）
-            if mixup_fn is not None:
-                # 將 predicted 與原始標籤比較
-                mixup_total += original_targets.size(0)
-                mixup_correct += predicted.eq(original_targets).sum().item()
-            else:
-                # 標準準確率計算
-                total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
-            
-            batch_processed += 1
-            
-            # 重置優化器梯度和累積計數器
-            optimizer.zero_grad(set_to_none=True)
-            accumulation_counter = 0
-            
-            # 每隔一段時間釋放未使用的記憶體
-            if i % 20 == 0:  # 增加釋放頻率
-                torch.cuda.empty_cache()
-        
-        # 檢測批次處理時間，如果過長則發出警告
-        batch_time = time.time() - batch_start_time
-        if batch_time > 30:  # 30秒作為警告閾值
-            logger.warning(f"Batch {i} took {batch_time:.2f} seconds to process. Possible bottleneck detected.")
+        total_loss += loss.item()
+        _, predicted = outputs.max(1)
+        total += targets.size(0)
+        correct += predicted.eq(targets).sum().item()
 
-    # 如果整個 epoch 中檢測到 NaN，則發出警告
-    if nan_detected:
-        logger.warning(f"NaN values detected during training in epoch {epoch}. Consider adjusting learning rate or gradient clipping.")
-
-    # 防止除以零錯誤
-    if batch_processed == 0:
-        logger.error(f"All batches were skipped in epoch {epoch}! Training cannot proceed.")
-        accuracy = 0.0
-        avg_loss = float('nan')
-    else:
-        avg_loss = total_loss / batch_processed
-        
-        # 計算標準準確率或近似準確率
-        if mixup_fn is None and total > 0:
-            accuracy = 100. * correct / total
-        elif mixup_total > 0:  # 使用 mixup 時的近似準確率
-            accuracy = 100. * mixup_correct / mixup_total
-        else:
-            accuracy = float('nan')
-        
-    # 報告當前學習率
-    current_lr = [group['lr'] for group in optimizer.param_groups]
-    
-    # 準備日誌消息
-    accuracy_msg = f"{accuracy:.2f}%" if not np.isnan(accuracy) else "N/A (using mixup)"
-    if mixup_fn is not None and not np.isnan(accuracy):
-        accuracy_msg = f"{accuracy:.2f}% (近似值)"
-    
-    logger.info(f"Train Loss: {avg_loss:.3f} | Train Accuracy: {accuracy_msg} | Batches processed: {batch_processed}/{len(dataloader)} | LR: {current_lr}")
-    
-    # 更新調度器
-    scheduler.step(epoch)
-    
-    return accuracy, avg_loss
+    accuracy = 100. * correct / total
+    print(f"Train Loss: {total_loss / len(dataloader):.3f} | Train Accuracy: {accuracy:.2f}%")
+    return accuracy, total_loss / len(dataloader)
 
 
-# Testing Function
-def test_epoch(model, dataloader, criterion, device, logger):
-    """
-    記憶體優化版的測試函數，分批處理測試資料並確保正確釋放記憶體
-    """
+def test_epoch(model, dataloader, criterion, device):
     model.eval()
     total_loss = 0
     correct = 0
     total = 0
-    
-    # 檢測計數器
-    timeout_count = 0
-    
-    # 使用較小的批次進行處理，減少記憶體使用
-    # 確保使用torch.no_grad()上下文，避免保存不必要的梯度信息
+
     with torch.no_grad():
-        for i, (inputs, targets) in enumerate(tqdm(dataloader, desc="Testing")):
-            # 設置超時保護
-            timeout_handler.start()
-            
-            try:
-                inputs, targets = inputs.to(device), targets.to(device)
-                
-                # 使用純淨的推理模式
-                outputs = model(inputs)
-                
-                # 計算損失
-                loss = criterion(outputs, targets)
-                
-                # 累積損失和正確預測數
-                total_loss += loss.item()
-                _, predicted = outputs.max(1)
-                total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
-                
-                # 主動清除不需要的張量以釋放記憶體
-                del outputs, loss, predicted
-                
-                # 每10個批次清空一次CUDA快取
-                if i % 10 == 0:
-                    torch.cuda.empty_cache()
-                
-                # 停止超時保護
-                timeout_handler.stop()
-                
-            except RuntimeError as e:
-                timeout_handler.stop()
-                if "NCCL" in str(e) or "timeout" in str(e).lower():
-                    logger.error(f"NCCL error during testing: {e}")
-                    timeout_count += 1
-                    if timeout_count >= 3:
-                        logger.critical("Too many NCCL errors during testing, attempting recovery...")
-                        try:
-                            synchronize()
-                            timeout_count = 0
-                        except:
-                            pass
-                else:
-                    logger.error(f"Error during testing: {e}")
-    
-    # 計算平均損失和準確率
-    accuracy = 100. * correct / total if total > 0 else 0.0
-    avg_loss = total_loss / len(dataloader) if len(dataloader) > 0 else float('nan')
-    logger.info(f"Test Loss: {avg_loss:.3f} | Test Accuracy: {accuracy:.2f}%")
-    return accuracy, avg_loss
+        for inputs, targets in tqdm(dataloader, desc="Testing"):
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+
+            total_loss += loss.item()
+            _, predicted = outputs.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
+
+    accuracy = 100. * correct / total
+    print(f"Test Loss: {total_loss / len(dataloader):.3f} | Test Accuracy: {accuracy:.2f}%")
+    return accuracy, total_loss / len(dataloader)
 
 
 # Generate CAM for Swin Transformer V2
@@ -787,7 +562,7 @@ if __name__ == "__main__":
         
         model = model.to(device)
         
-        # 跳過載入預訓練權重，從頭開始訓練
+        # 從頭開始訓練，不使用預訓練權重
         logger.info("從頭開始訓練模型，不使用預訓練權重")
         
         # 使用 DDP 包裝模型
@@ -895,10 +670,9 @@ if __name__ == "__main__":
             
             # 在訓練時使用 mixup_fn 和較小的梯度累積步數
             try:
-                train_acc, train_loss = train_epoch_amp(
+                train_acc, train_loss = train_epoch(
                     model, train_loader, optimizer, scheduler, criterion_train, 
-                    device, scaler, epoch, logger, mixup_fn=mixup_fn,
-                    gradient_accumulation_steps=2  # 使用較小的梯度累積步數，以更好地利用 GPU 資源
+                    device
                 )
             except Exception as e:
                 logger.error(f"Error during training epoch: {e}")
