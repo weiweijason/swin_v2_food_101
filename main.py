@@ -108,7 +108,7 @@ def check_img_size_compatibility(img_size, window_size):
 # 設置日誌格式
 def setup_logger(local_rank):
     # 創建日誌格式
-    log_format = '%(asctime)s - %(levelname)s - Rank[%(rank)s] - %(message)s'
+    log_format = '%(asctime)s - %(level別)s - Rank[%(rank)s] - %(message)s'
     date_format = '%Y-%m-%d %H:%M:%S'
     
     # 創建一個自定義的過濾器，添加rank信息
@@ -155,8 +155,8 @@ def synchronize():
     """
     if not dist.is_available() or not dist.is_initialized():
         return
-    world_size = dist.get_world_size()
-    if world_size == 1:
+    world size = dist.get_world_size()
+    if world size == 1:
         return
     dist.barrier()
 
@@ -492,13 +492,16 @@ if __name__ == "__main__":
             'waffles'
         ]
 
-        # 更新訓練集增強策略，簡化以更接近 V1 版本
+        # 更新訓練集增強策略，添加更多數據增強技術
         train_transform = transforms.Compose([
             transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-            transforms.RandomHorizontalFlip(),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomRotation(15),  # 添加隨機旋轉
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),  # 添加顏色抖動
+            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),  # 添加隨機平移
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                std=[0.229, 0.224, 0.225])
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            transforms.RandomErasing(p=0.2)  # 添加隨機擦除區域
         ])
 
         # 測試集轉換保持簡單
@@ -662,7 +665,7 @@ if __name__ == "__main__":
         optimizer = optim.AdamW(
             model.parameters(),
             lr=2e-5,  # 將學習率降低到與 V1 版本一致
-            weight_decay=0.05,  # 輕微提高權重衰減以增強正則化
+            weight_decay=0.1,  # 增加權重衰減從0.05到0.1以強化正則化
             eps=1e-8,  # 保持較高的epsilon值提高數值穩定性
             betas=(0.9, 0.999)  # 默認動量參數
         )
@@ -715,24 +718,60 @@ if __name__ == "__main__":
         checkpoint_dir = "checkpoints"
         os.makedirs(checkpoint_dir, exist_ok=True)
         
-        # 嘗試加載檢查點（如果存在）
+        # 嘗試加載特定 epoch 的檢查點（從第35個epoch重新開始）
         start_epoch = 0
         best_acc = 0
-        checkpoint_path = os.path.join(checkpoint_dir, "latest_checkpoint.pth")
+        RESUME_FROM_EPOCH = 35  # 從第35個epoch重新開始訓練
+        checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{RESUME_FROM_EPOCH}.pth")
         
         if os.path.exists(checkpoint_path):
-            logger.info(f"Loading checkpoint from {checkpoint_path}")
+            logger.info(f"Loading specific checkpoint from epoch {RESUME_FROM_EPOCH}: {checkpoint_path}")
             try:
                 checkpoint = torch.load(checkpoint_path, map_location=device)
                 model.module.load_state_dict(checkpoint['model_state_dict'])
                 optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-                scaler.load_state_dict(checkpoint['scaler_state_dict'])
-                start_epoch = checkpoint['epoch'] + 1
+                if 'scaler_state_dict' in checkpoint:
+                    scaler.load_state_dict(checkpoint['scaler_state_dict'])
+                start_epoch = checkpoint['epoch']  # 直接使用檢查點中的 epoch
                 best_acc = checkpoint['best_acc']
                 logger.info(f"Checkpoint loaded. Resuming from epoch {start_epoch}")
             except Exception as e:
                 logger.warning(f"Failed to load checkpoint: {e}")
+                # 如果無法加載特定 epoch 的檢查點，嘗試加載最新的檢查點
+                latest_checkpoint_path = os.path.join(checkpoint_dir, "latest_checkpoint.pth")
+                if os.path.exists(latest_checkpoint_path):
+                    logger.info(f"Trying to load latest checkpoint instead: {latest_checkpoint_path}")
+                    try:
+                        checkpoint = torch.load(latest_checkpoint_path, map_location=device)
+                        model.module.load_state_dict(checkpoint['model_state_dict'])
+                        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                        if 'scaler_state_dict' in checkpoint:
+                            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+                        start_epoch = checkpoint['epoch'] + 1
+                        best_acc = checkpoint['best_acc']
+                        logger.info(f"Latest checkpoint loaded. Resuming from epoch {start_epoch}")
+                    except Exception as e2:
+                        logger.warning(f"Failed to load latest checkpoint: {e2}")
+        else:
+            logger.warning(f"Specified epoch {RESUME_FROM_EPOCH} checkpoint not found at {checkpoint_path}")
+            # 嘗試加載最新的檢查點
+            latest_checkpoint_path = os.path.join(checkpoint_dir, "latest_checkpoint.pth")
+            if os.path.exists(latest_checkpoint_path):
+                logger.info(f"Trying to load latest checkpoint instead: {latest_checkpoint_path}")
+                try:
+                    checkpoint = torch.load(latest_checkpoint_path, map_location=device)
+                    model.module.load_state_dict(checkpoint['model_state_dict'])
+                    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                    if 'scaler_state_dict' in checkpoint:
+                        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+                    start_epoch = checkpoint['epoch'] + 1
+                    best_acc = checkpoint['best_acc']
+                    logger.info(f"Latest checkpoint loaded. Resuming from epoch {start_epoch}")
+                except Exception as e:
+                    logger.warning(f"Failed to load latest checkpoint: {e}")
         
         # 主訓練循環
         for epoch in range(start_epoch, NUM_EPOCHS):
