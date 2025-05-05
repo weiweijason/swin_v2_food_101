@@ -155,8 +155,8 @@ def synchronize():
     """
     if not dist.is_available() or not dist.is_initialized():
         return
-    world size = dist.get_world_size()
-    if world size == 1:
+    world_size = dist.get_world_size()
+    if world_size == 1:
         return
     dist.barrier()
 
