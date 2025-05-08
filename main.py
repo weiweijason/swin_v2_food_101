@@ -497,9 +497,9 @@ if __name__ == "__main__":
             transforms.Resize((IMAGE_SIZE+32, IMAGE_SIZE+32)),  # 先放大圖像
             transforms.RandomCrop(IMAGE_SIZE),  # 隨機裁剪以增加多樣性
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(20),  # 增加旋轉角度
+            transforms.RandomRotation((-20, 20)),  # 修正: 使用元組而非單一整數
             transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.15),  # 增強顏色變化
-            transforms.RandomAffine(degrees=10, translate=(0.15, 0.15), scale=(0.8, 1.2)),  # 增加更多變形
+            transforms.RandomAffine(degrees=(-10, 10), translate=(0.15, 0.15), scale=(0.8, 1.2)),  # 修正: 使用元組表示角度範圍
             transforms.RandomPerspective(distortion_scale=0.2, p=0.5),  # 增加透視變換
             transforms.RandomGrayscale(p=0.05),  # 有機率轉為灰度圖
             transforms.ToTensor(),
@@ -566,7 +566,7 @@ if __name__ == "__main__":
         # 根據模型規格初始化 SwinV2 模型
         logger.info(f"使用 {MODEL_SIZE} 規格的 Swin Transformer V2 模型")
         
-        if MODEL_SIZE == "tiny":
+        if (MODEL_SIZE == "tiny"):
             model = swin_transformer_v2_tiny_classifier(
                 input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
                 window_size=WINDOW_SIZE,
@@ -574,7 +574,7 @@ if __name__ == "__main__":
                 use_checkpoint=True,
                 dropout_path=0.3  # 增加 dropout 以提高泛化能力
             )
-        elif MODEL_SIZE == "small":
+        elif (MODEL_SIZE == "small"):
             model = swin_transformer_v2_small_classifier(
                 input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
                 window_size=WINDOW_SIZE,
@@ -582,7 +582,7 @@ if __name__ == "__main__":
                 use_checkpoint=True,
                 dropout_path=0.3
             )
-        elif MODEL_SIZE == "large":
+        elif (MODEL_SIZE == "large"):
             model = swin_transformer_v2_large_classifier(
                 input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
                 window_size=WINDOW_SIZE,
@@ -745,11 +745,11 @@ if __name__ == "__main__":
                     t.saturation = 0.3 * factor
                     t.hue = 0.15 * factor
                 elif isinstance(t, transforms.RandomRotation):
-                    # 增加旋轉角度
-                    t.degrees = int(10 + 10 * progress)  # 從10度增加到20度
+                    # 增加旋轉角度 - 修正：使用元組格式
+                    t.degrees = (-int(10 + 10 * progress), int(10 + 10 * progress))  # 從±10度增加到±20度
                 elif isinstance(t, transforms.RandomAffine):
-                    # 增加變形強度
-                    t.degrees = int(5 + 5 * progress)  # 從5度增加到10度
+                    # 增加變形強度 - 修正：使用元組格式
+                    t.degrees = (-int(5 + 5 * progress), int(5 + 5 * progress))  # 從±5度增加到±10度
                     t.translate = (0.1 + 0.05 * progress, 0.1 + 0.05 * progress)
                 elif isinstance(t, RandomErasing):
                     # 增加擦除概率
