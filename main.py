@@ -236,7 +236,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, criterion, device, epoc
 
     accuracy = 100. * correct / total
     print(f"Train Loss: {total_loss / len(dataloader):.3f} | Train Accuracy: {accuracy:.2f}%")
-    return accuracy, total_loss / len(dataloader)
+    return accuracy, total_loss / len(dataloader
 
 
 def test_epoch(model, dataloader, criterion, device, logger=None):
@@ -753,9 +753,15 @@ if __name__ == "__main__":
             logger.info(f"- Weight decay: backbone {param_groups[0]['weight_decay']}, head {param_groups[1]['weight_decay']}")
             logger.info(f"- Stochastic depth: 0.3 (increased for better regularization)")
         
+        # 在訓練循環之前，創建必要的輸出目錄
+        outputs_dir = "outputs"
+        os.makedirs(outputs_dir, exist_ok=True)  # 確保outputs目錄存在
+        logger.info(f"確保輸出目錄 {outputs_dir} 存在")
+
         # 檢查點設置
         checkpoint_dir = "checkpoints"
         os.makedirs(checkpoint_dir, exist_ok=True)
+        logger.info(f"確保檢查點目錄 {checkpoint_dir} 存在")
         
         # 從最後一個檢查點開始訓練
         start_epoch = 0
