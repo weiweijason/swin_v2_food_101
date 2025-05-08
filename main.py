@@ -331,6 +331,53 @@ def visualize_cam(image, cam):
     return overlay
 
 
+def train_epoch_with_mixup(model, dataloader, optimizer, scheduler, criterion, device, epoch, mixup_fn):
+    """
+    使用 mixup 和 cutmix 增強的訓練函數
+    """
+    model.train()
+    total_loss = 0
+    correct = 0
+    total = 0
+
+    for i, (inputs, targets) in enumerate(tqdm(dataloader, desc="Training with Mixup")):
+        inputs, targets = inputs.to(device), targets.to(device)
+        
+        # 應用 mixup 或 cutmix 變換
+        if mixup_fn is not None:
+            inputs, targets = mixup_fn(inputs, targets)
+        
+        # 清空梯度
+        optimizer.zero_grad()
+        
+        # 前向傳播
+        outputs = model(inputs)
+        
+        # 計算損失 - 使用混合後的軟標籤
+        loss = criterion(outputs, targets)
+        
+        # 反向傳播和優化
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        
+        # 如果是混合標籤，使用最高概率的類別作為預測結果
+        if mixup_fn is not None:
+            _, predicted = outputs.max(1)
+            _, targets_max = targets.max(1)  # 獲取混合標籤中最可能的類別
+            total += targets.size(0)
+            correct += predicted.eq(targets_max).sum().item()
+        else:
+            _, predicted = outputs.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
+
+    accuracy = 100. * correct / total
+    print(f"Train Loss: {total_loss / len(dataloader):.3f} | Train Accuracy: {accuracy:.2f}%")
+    return accuracy, total_loss / len(dataloader)
+
+
 # Main Program
 if __name__ == "__main__":
     # NOTE: The process group is initialized by torchrun automatically
@@ -826,9 +873,10 @@ if __name__ == "__main__":
             
             # 訓練一個epoch
             try:
-                train_acc, train_loss = train_epoch(
+                # 使用 mixup 和 cutmix 進行數據增強
+                train_acc, train_loss = train_epoch_with_mixup(
                     model, train_loader, optimizer, scheduler, criterion_train, 
-                    device, epoch
+                    device, epoch, mixup_fn
                 )
                 
                 # 在每個 epoch 後調用 scheduler.step()
