@@ -433,7 +433,7 @@ if __name__ == "__main__":
         WARMUP_EPOCHS = 3  # 減少預熱時間
 
         # 設置預訓練權重路徑為指定的 large 模型
-        PRETRAINED_WEIGHTS = "swinv2_imagenet_pretrained.pth"
+        PRETRAINED_WEIGHTS = "swinv2_large_patch4_window12_192_22k.pth"
 
         LABELS = [
             'apple_pie',
