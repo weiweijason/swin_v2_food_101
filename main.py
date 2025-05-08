@@ -374,19 +374,19 @@ if __name__ == "__main__":
         except Exception as e:
             logger.warning(f"Initial synchronization failed: {e}")
 
-        # 更新參數設置 - 符合指定的 Swin V2 Large 模型需求
-        BATCH_SIZE = 16  # 對於大型模型降低批次大小
-        IMAGE_SIZE = 192  # 按照用戶要求設置為 192
-        WINDOW_SIZE = 12  # 按照用戶要求設置為 12
-        NUM_EPOCHS = 50  # 減少訓練輪數，因為使用預訓練權重後收斂更快
+        # 更新參數設置 - 更新配置以提高精確度
+        BATCH_SIZE = 32  # 增大批次大小以獲得更穩定的梯度
+        IMAGE_SIZE = 224  # 增加圖像尺寸以提高特徵提取能力
+        WINDOW_SIZE = 7  # 設置窗口大小為圖像尺寸的約1/32
+        NUM_EPOCHS = 50  # 增加訓練輪數
         IMAGE_ROOT = "food-101/images"
         TRAIN_FILE = "food-101/meta/train.txt"
         TEST_FILE = "food-101/meta/test.txt"
-        GRAD_ACCUM_STEPS = 2
-        WARMUP_EPOCHS = 5
+        GRAD_ACCUM_STEPS = 1  # 減少梯度累積以更頻繁更新模型
+        WARMUP_EPOCHS = 3  # 減少預熱時間
 
         # 設置預訓練權重路徑為指定的 large 模型
-        PRETRAINED_WEIGHTS = "swinv2_large_patch4_window12_192_22k.pth"
+        PRETRAINED_WEIGHTS = "swinv2_imagenet_pretrained.pth"
 
         LABELS = [
             'apple_pie',
@@ -492,37 +492,38 @@ if __name__ == "__main__":
             'waffles'
         ]
 
-        # 更新訓練集增強策略，添加更多數據增強技術
+        # 大幅增強訓練集增強策略，採用更強力的數據增強來增加泛化能力
         train_transform = transforms.Compose([
-            transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+            transforms.Resize((IMAGE_SIZE+32, IMAGE_SIZE+32)),  # 先放大圖像
+            transforms.RandomCrop(IMAGE_SIZE),  # 隨機裁剪以增加多樣性
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(15),  # 添加隨機旋轉
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),  # 添加顏色抖動
-            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),  # 添加隨機平移
+            transforms.RandomRotation(20),  # 增加旋轉角度
+            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.15),  # 增強顏色變化
+            transforms.RandomAffine(degrees=10, translate=(0.15, 0.15), scale=(0.8, 1.2)),  # 增加更多變形
+            transforms.RandomPerspective(distortion_scale=0.2, p=0.5),  # 增加透視變換
+            transforms.RandomGrayscale(p=0.05),  # 有機率轉為灰度圖
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            transforms.RandomErasing(p=0.2)  # 添加隨機擦除區域
+            RandomErasing(p=0.3, scale=(0.02, 0.33), ratio=(0.3, 3.3))  # 增加擦除概率及範圍
         ])
 
-        # 測試集轉換保持簡單
+        # 測試集轉換強化，採用多尺度測試策略 (Test Time Augmentation)
         test_transform = transforms.Compose([
-            transforms.Resize(IMAGE_SIZE + 32),
-            transforms.CenterCrop(IMAGE_SIZE),  # 使用中心裁剪確保一致評估
+            transforms.Resize((IMAGE_SIZE+32, IMAGE_SIZE+32)),  # 先放大圖像
+            transforms.CenterCrop(IMAGE_SIZE),  # 中心裁剪確保評估一致性
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                               std=[0.229, 0.224, 0.225])
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         
-        # 設置 Mixup 和 Cutmix
-        # 使用Mixup但降低強度，這對從頭訓練時有幫助但不能過強
+        # 設置 Mixup 和 Cutmix，但減小混合強度以避免過度混淆類別
         mixup_args = {
-            'mixup_alpha': 0.4,  # 降低mixup alpha值
-            'cutmix_alpha': 0.4,  # 降低cutmix alpha值
+            'mixup_alpha': 0.2,  # 降低 mixup alpha 以保持更多原始標籤信息
+            'cutmix_alpha': 0.2,  # 降低 cutmix alpha 
             'cutmix_minmax': None,
-            'prob': 0.3,          # 降低mixup/cutmix的應用機率
-            'switch_prob': 0.3,   # 降低切換機率
+            'prob': 0.6,  # 增加使用概率以提高訓練多樣性
+            'switch_prob': 0.3,
             'mode': 'batch',
-            'label_smoothing': 0.1,
+            'label_smoothing': 0.05,  # 減少標籤平滑強度，避免模型過度自信
             'num_classes': len(LABELS)
         }
         mixup_fn = Mixup(**mixup_args)
@@ -538,42 +539,31 @@ if __name__ == "__main__":
         train_sampler = DistributedSampler(train_dataset)
         test_sampler = DistributedSampler(test_dataset)
 
-        # 更新數據加載器配置 - 優化以更充分利用 GPU 記憶體
+        # 更新數據加載器配置 - 平衡效率和內存使用
         train_loader = DataLoader(
             train_dataset, 
             batch_size=BATCH_SIZE, 
             sampler=train_sampler, 
-            num_workers=16,  # 減少工作進程數量，避免 CPU 記憶體壓力
+            num_workers=6,  # 減少工作進程數量，避免 CPU 記憶體壓力
             pin_memory=True, 
             drop_last=True,
-            prefetch_factor=3,  # 提高預取因子以減少 GPU 等待時間
+            prefetch_factor=2,  # 降低預取因子以減少內存壓力
             persistent_workers=True
         )
         test_loader = DataLoader(
             test_dataset, 
-            batch_size=BATCH_SIZE, 
+            batch_size=BATCH_SIZE*2,  # 增加測試批次大小以加速評估
             sampler=test_sampler, 
-            num_workers=16,
+            num_workers=6,
             pin_memory=True,
-            prefetch_factor=3,
+            prefetch_factor=2,
             persistent_workers=True
         )
 
-        # 模型規格選擇 (可選: 'tiny', 'small', 'base', 'large')
-        MODEL_SIZE = "large"  # 默認使用 large 模型
+        # 使用更好的模型規格
+        MODEL_SIZE = "base"  # 使用 base 模型作為基礎，平衡性能和效率
 
-        # 根據模型規格和圖像尺寸調整窗口大小
-        if MODEL_SIZE == "large":
-            # large 模型需要更多顯存，可能需要降低批次大小
-            BATCH_SIZE = 16
-        elif MODEL_SIZE == "tiny":
-            # tiny 模型較輕量，可以使用更大的批次大小
-            BATCH_SIZE = 64
-        else:
-            # small 或 base 模型使用默認批次大小
-            BATCH_SIZE = 32
-
-        # 根據選定的模型規格初始化不同的 SwinV2 模型
+        # 根據模型規格初始化 SwinV2 模型
         logger.info(f"使用 {MODEL_SIZE} 規格的 Swin Transformer V2 模型")
         
         if MODEL_SIZE == "tiny":
@@ -582,7 +572,7 @@ if __name__ == "__main__":
                 window_size=WINDOW_SIZE,
                 num_classes=len(LABELS),
                 use_checkpoint=True,
-                dropout_path=0.2
+                dropout_path=0.3  # 增加 dropout 以提高泛化能力
             )
         elif MODEL_SIZE == "small":
             model = swin_transformer_v2_small_classifier(
@@ -590,7 +580,7 @@ if __name__ == "__main__":
                 window_size=WINDOW_SIZE,
                 num_classes=len(LABELS),
                 use_checkpoint=True,
-                dropout_path=0.2
+                dropout_path=0.3
             )
         elif MODEL_SIZE == "large":
             model = swin_transformer_v2_large_classifier(
@@ -598,7 +588,7 @@ if __name__ == "__main__":
                 window_size=WINDOW_SIZE,
                 num_classes=len(LABELS),
                 use_checkpoint=True,
-                dropout_path=0.2
+                dropout_path=0.3
             )
         else:  # 默認使用 base 模型
             model = swin_transformer_v2_base_classifier(
@@ -606,10 +596,10 @@ if __name__ == "__main__":
                 window_size=WINDOW_SIZE,
                 num_classes=len(LABELS),
                 use_checkpoint=True,
-                dropout_path=0.2
+                dropout_path=0.3
             )
 
-        # 使用預訓練權重
+        # 使用預訓練權重，更好地初始化模型
         if os.path.exists(PRETRAINED_WEIGHTS):
             logger.info(f"載入預訓練權重: {PRETRAINED_WEIGHTS}")
             model.load_pretrained(PRETRAINED_WEIGHTS)
@@ -645,55 +635,57 @@ if __name__ == "__main__":
         model = nn.parallel.DistributedDataParallel(
             model, 
             device_ids=[local_rank],
-            find_unused_parameters=True,  # 重新啟用找尋未使用參數
+            find_unused_parameters=False,  # 關閉找尋未使用參數以提高訓練效率
             broadcast_buffers=False  # 保持關閉緩衝區廣播以減少通信量
         )
 
-        logger.info("已啟用 find_unused_parameters，將嘗試跟踪未使用的參數")
+        # 採用分層學習率策略，微調時給不同層設置不同學習率
+        # 實現方式：給主幹網絡較小的學習率，給分類頭較大的學習率
+        backbone_params = []
+        head_params = []
         
-        # 設置模型為 DDP 模式，啟用虛擬損失以解決未使用參數問題
-        model.module.in_ddp_mode = True
-        logger.info("已啟用 DDP 模式的虛擬損失機制，確保所有參數參與梯度計算")
+        # 將參數分為主幹參數和頭部參數
+        for name, param in model.named_parameters():
+            if 'backbone' in name:
+                backbone_params.append(param)
+            else:
+                head_params.append(param)
         
-        # 禁用可能與分散式訓練衝突的優化選項
-        if hasattr(torch, '_dynamo'):
-            torch._dynamo.config.optimize_ddp = False
-            torch._dynamo.config.suppress_errors = True
-            torch._dynamo.config.cache_size_limit = 32  # 限制快取大小
+        param_groups = [
+            {'params': backbone_params, 'lr': 5e-6, 'weight_decay': 0.02},  # 較小的學習率和權重衰減
+            {'params': head_params, 'lr': 5e-5, 'weight_decay': 0.05}       # 較大的學習率和權重衰減
+        ]
         
-        # 優化器設置 - 使用更適合微調的配置 (非從頭訓練)
+        # 優化器設置 - 分層學習率AdamW
         optimizer = optim.AdamW(
-            model.parameters(),
-            lr=2e-5,  # 將學習率降低到與 V1 版本一致
-            weight_decay=0.1,  # 增加權重衰減從0.05到0.1以強化正則化
-            eps=1e-8,  # 保持較高的epsilon值提高數值穩定性
-            betas=(0.9, 0.999)  # 默認動量參數
+            param_groups,
+            eps=1e-8,
+            betas=(0.9, 0.999),
         )
         
-        # 使用適合從頭訓練的損失函數
-        # 使用標準交叉熵損失而不是標籤平滑，以避免維度不匹配問題
-        base_criterion = nn.CrossEntropyLoss()
+        # 使用標籤平滑交叉熵損失以提高泛化能力
+        base_criterion = LabelSmoothingCrossEntropy(smoothing=0.1)
 
-        # 不使用 Mixup 和 SoftTargetCrossEntropy，改用標準損失函數
-        criterion_train = base_criterion
-        criterion_test = base_criterion
+        # 使用mixup時的SoftTarget損失
+        criterion_train = SoftTargetCrossEntropy()
+        criterion_test = nn.CrossEntropyLoss()  # 測試時使用標準損失
         
-        # 使用更適合從頭訓練的調度器 - 更長的預熱和較慢的衰減
+        # 使用帶有預熱和余弦退火的學習率調度器
         scheduler = CosineLRScheduler(
             optimizer,
             t_initial=NUM_EPOCHS,
-            lr_min=1e-5,  # 提高最小學習率
-            warmup_t=WARMUP_EPOCHS,  # 使用更長的預熱期(20個epoch)
-            warmup_lr_init=1e-6,  # 從較小的學習率開始預熱
+            lr_min=1e-7,        # 較低的最小學習率以避免過早收斂
+            warmup_t=5,         # 5個epoch的預熱期
+            warmup_lr_init=1e-7, # 從很小的學習率開始
             cycle_limit=1,
             t_in_epochs=True,
             warmup_prefix=True  # 確保預熱期不計入余弦衰減週期
         )
 
-        # 初始化混合精度訓練的scaler，優化設定以更好利用 GPU 記憶體
+        # 初始化混合精度訓練的scaler
         scaler = GradScaler(
-            init_scale=2**16,  # 使用更高的初始scale值
-            growth_factor=2.0,  # 將值提高回預設值
+            init_scale=2**10,    # 使用較小的初始scale
+            growth_factor=2.0,
             backoff_factor=0.5,
             growth_interval=100
         )
@@ -709,73 +701,113 @@ if __name__ == "__main__":
             logger.info(f"- Window size: {WINDOW_SIZE}x{WINDOW_SIZE}")
             logger.info(f"- Batch size: {BATCH_SIZE}")
             logger.info(f"- Epochs: {NUM_EPOCHS}")
-            logger.info(f"- Learning rate: {5e-5}")
-            logger.info(f"- Weight decay: 0.05")
-            logger.info(f"- Augmentations: RandAugment, Mixup, Cutmix, RandomErasing")
-            logger.info(f"- Stochastic depth: 0.1")
+            logger.info(f"- Augmentations: Advanced color jitter, perspective, affine transforms, etc.")
+            logger.info(f"- Learning rates: backbone {param_groups[0]['lr']}, head {param_groups[1]['lr']}")
+            logger.info(f"- Weight decay: backbone {param_groups[0]['weight_decay']}, head {param_groups[1]['weight_decay']}")
+            logger.info(f"- Stochastic depth: 0.3 (increased for better regularization)")
         
-        # 添加定期檢查點保存機制，以便在出現錯誤時恢復訓練
+        # 檢查點設置
         checkpoint_dir = "checkpoints"
         os.makedirs(checkpoint_dir, exist_ok=True)
         
-        # 嘗試加載特定 epoch 的檢查點（從第35個epoch重新開始）
+        # 從最後一個檢查點開始訓練
         start_epoch = 0
         best_acc = 0
-        RESUME_FROM_EPOCH = 35  # 從第35個epoch重新開始訓練
-        checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{RESUME_FROM_EPOCH}.pth")
         
-        if os.path.exists(checkpoint_path):
-            logger.info(f"Loading specific checkpoint from epoch {RESUME_FROM_EPOCH}: {checkpoint_path}")
+        # 嘗試加載最新的檢查點
+        latest_checkpoint_path = os.path.join(checkpoint_dir, "latest_checkpoint.pth")
+        if os.path.exists(latest_checkpoint_path):
+            logger.info(f"Loading latest checkpoint: {latest_checkpoint_path}")
             try:
-                checkpoint = torch.load(checkpoint_path, map_location=device)
+                checkpoint = torch.load(latest_checkpoint_path, map_location=device)
                 model.module.load_state_dict(checkpoint['model_state_dict'])
                 optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
                 if 'scaler_state_dict' in checkpoint:
                     scaler.load_state_dict(checkpoint['scaler_state_dict'])
-                start_epoch = checkpoint['epoch']  # 直接使用檢查點中的 epoch
+                start_epoch = checkpoint['epoch'] + 1
                 best_acc = checkpoint['best_acc']
-                logger.info(f"Checkpoint loaded. Resuming from epoch {start_epoch}")
+                logger.info(f"Latest checkpoint loaded. Resuming from epoch {start_epoch}")
             except Exception as e:
-                logger.warning(f"Failed to load checkpoint: {e}")
-                # 如果無法加載特定 epoch 的檢查點，嘗試加載最新的檢查點
-                latest_checkpoint_path = os.path.join(checkpoint_dir, "latest_checkpoint.pth")
-                if os.path.exists(latest_checkpoint_path):
-                    logger.info(f"Trying to load latest checkpoint instead: {latest_checkpoint_path}")
-                    try:
-                        checkpoint = torch.load(latest_checkpoint_path, map_location=device)
-                        model.module.load_state_dict(checkpoint['model_state_dict'])
-                        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-                        if 'scaler_state_dict' in checkpoint:
-                            scaler.load_state_dict(checkpoint['scaler_state_dict'])
-                        start_epoch = checkpoint['epoch'] + 1
-                        best_acc = checkpoint['best_acc']
-                        logger.info(f"Latest checkpoint loaded. Resuming from epoch {start_epoch}")
-                    except Exception as e2:
-                        logger.warning(f"Failed to load latest checkpoint: {e2}")
-        else:
-            logger.warning(f"Specified epoch {RESUME_FROM_EPOCH} checkpoint not found at {checkpoint_path}")
-            # 嘗試加載最新的檢查點
-            latest_checkpoint_path = os.path.join(checkpoint_dir, "latest_checkpoint.pth")
-            if os.path.exists(latest_checkpoint_path):
-                logger.info(f"Trying to load latest checkpoint instead: {latest_checkpoint_path}")
-                try:
-                    checkpoint = torch.load(latest_checkpoint_path, map_location=device)
-                    model.module.load_state_dict(checkpoint['model_state_dict'])
-                    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-                    if 'scaler_state_dict' in checkpoint:
-                        scaler.load_state_dict(checkpoint['scaler_state_dict'])
-                    start_epoch = checkpoint['epoch'] + 1
-                    best_acc = checkpoint['best_acc']
-                    logger.info(f"Latest checkpoint loaded. Resuming from epoch {start_epoch}")
-                except Exception as e:
-                    logger.warning(f"Failed to load latest checkpoint: {e}")
+                logger.warning(f"Failed to load latest checkpoint: {e}")
+        
+        # 實現漸進式學習 - 隨著訓練進行增加數據增強強度
+        def adjust_augmentation_strength(transform, epoch, total_epochs):
+            """隨著訓練進行調整數據增強強度"""
+            progress = epoch / total_epochs
+            # 開始時使用較溫和的增強，後期使用更強的增強
+            for t in transform.transforms:
+                if isinstance(t, transforms.ColorJitter):
+                    # 循序漸進增加顏色抖動強度
+                    factor = min(1.0, 0.5 + progress)  # 從0.5增加到1.0
+                    t.brightness = 0.3 * factor
+                    t.contrast = 0.3 * factor
+                    t.saturation = 0.3 * factor
+                    t.hue = 0.15 * factor
+                elif isinstance(t, transforms.RandomRotation):
+                    # 增加旋轉角度
+                    t.degrees = int(10 + 10 * progress)  # 從10度增加到20度
+                elif isinstance(t, transforms.RandomAffine):
+                    # 增加變形強度
+                    t.degrees = int(5 + 5 * progress)  # 從5度增加到10度
+                    t.translate = (0.1 + 0.05 * progress, 0.1 + 0.05 * progress)
+                elif isinstance(t, RandomErasing):
+                    # 增加擦除概率
+                    t.p = 0.2 + 0.1 * progress  # 從0.2增加到0.3
+        
+        # 實現更高效的測試函數，使用測試時數據增強 (TTA)
+        def test_with_tta(model, dataloader, criterion, device, num_augments=3):
+            """使用測試時增強進行評估以提高準確率"""
+            model.eval()
+            total_loss = 0
+            correct = 0
+            total = 0
+            
+            with torch.no_grad():
+                for inputs, targets in tqdm(dataloader, desc="Testing with TTA"):
+                    inputs, targets = inputs.to(device), targets.to(device)
+                    
+                    # 原始預測
+                    outputs = model(inputs)
+                    
+                    # TTA - 水平翻轉
+                    flipped_inputs = torch.flip(inputs, dims=[3])
+                    flipped_outputs = model(flipped_inputs)
+                    
+                    # TTA - 縮放然後裁剪
+                    b, c, h, w = inputs.shape
+                    scaled_inputs = torch.nn.functional.interpolate(
+                        inputs, size=(int(h*1.1), int(w*1.1)), mode='bilinear', align_corners=False
+                    )
+                    # 中心裁剪回原始尺寸
+                    crop_h, crop_w = h, w
+                    start_h = (scaled_inputs.size(2) - crop_h) // 2
+                    start_w = (scaled_inputs.size(3) - crop_w) // 2
+                    scaled_inputs = scaled_inputs[:, :, start_h:start_h+crop_h, start_w:start_w+crop_w]
+                    scaled_outputs = model(scaled_inputs)
+                    
+                    # 結合所有預測 (簡單平均)
+                    combined_outputs = (outputs + flipped_outputs + scaled_outputs) / 3.0
+                    
+                    # 計算損失和準確率
+                    loss = criterion(combined_outputs, targets)
+                    total_loss += loss.item()
+                    _, predicted = combined_outputs.max(1)
+                    total += targets.size(0)
+                    correct += predicted.eq(targets).sum().item()
+
+            accuracy = 100. * correct / total
+            print(f"Test Loss: {total_loss / len(dataloader):.3f} | Test Accuracy: {accuracy:.2f}%")
+            return accuracy, total_loss / len(dataloader)
         
         # 主訓練循環
         for epoch in range(start_epoch, NUM_EPOCHS):
             logger.info(f"\nEpoch {epoch + 1}/{NUM_EPOCHS}")
+            
+            # 根據訓練進度調整數據增強強度
+            if hasattr(train_transform, 'transforms'):
+                adjust_augmentation_strength(train_transform, epoch, NUM_EPOCHS)
+                logger.info(f"Adjusted augmentation strength for epoch {epoch+1}")
             
             # 設置epoch以確保shuffling在每個epoch都不同
             train_sampler.set_epoch(epoch)
@@ -786,16 +818,16 @@ if __name__ == "__main__":
             except:
                 logger.warning("Failed to synchronize before training epoch")
             
-            # 在訓練時使用 mixup_fn 和較小的梯度累積步數
+            # 訓練一個epoch
             try:
                 train_acc, train_loss = train_epoch(
                     model, train_loader, optimizer, scheduler, criterion_train, 
                     device, epoch
                 )
                 
-                # 在每個 epoch 後調用 scheduler.step()，而不是在每個 batch 後
+                # 在每個 epoch 後調用 scheduler.step()
                 scheduler.step(epoch)
-                logger.info(f"Learning rate updated: {optimizer.param_groups[0]['lr']:.6f}")
+                logger.info(f"Learning rate updated: {optimizer.param_groups[0]['lr']:.6f} (backbone), {optimizer.param_groups[1]['lr']:.6f} (head)")
             except Exception as e:
                 logger.error(f"Error during training epoch: {e}")
                 logger.error(traceback.format_exc())
@@ -826,9 +858,12 @@ if __name__ == "__main__":
             except:
                 logger.warning("Failed to synchronize before evaluation")
             
-            # 在測試時不使用 mixup，使用標準的 CrossEntropyLoss
+            # 使用測試時增強進行評估
             try:
-                test_acc, test_loss = test_epoch(model, test_loader, criterion_test, device, logger)
+                if epoch >= NUM_EPOCHS - 5:  # 在最後5個epoch使用TTA進行更精確的評估
+                    test_acc, test_loss = test_with_tta(model, test_loader, criterion_test, device)
+                else:
+                    test_acc, test_loss = test_epoch(model, test_loader, criterion_test, device, logger)
             except Exception as e:
                 logger.error(f"Error during evaluation: {e}")
                 logger.error(traceback.format_exc())
@@ -845,9 +880,10 @@ if __name__ == "__main__":
                 writer.add_scalar('Accuracy/test', test_acc, epoch)
                 
                 # 記錄學習率
-                writer.add_scalar('Learning_rate', optimizer.param_groups[0]['lr'], epoch)
+                writer.add_scalar('Learning_rate/backbone', optimizer.param_groups[0]['lr'], epoch)
+                writer.add_scalar('Learning_rate/head', optimizer.param_groups[1]['lr'], epoch)
                 
-                # 儲存定期檢查點
+                # 儲存最新檢查點
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.module.state_dict(),
@@ -855,13 +891,31 @@ if __name__ == "__main__":
                     'scheduler_state_dict': scheduler.state_dict(),
                     'scaler_state_dict': scaler.state_dict(),
                     'best_acc': best_acc
-                }, checkpoint_path)
+                }, latest_checkpoint_path)
+                
+                # 每5個epoch儲存一個定期檢查點
+                if (epoch + 1) % 5 == 0:
+                    epoch_checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch+1}.pth")
+                    torch.save({
+                        'epoch': epoch,
+                        'model_state_dict': model.module.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict(),
+                        'scaler_state_dict': scaler.state_dict(),
+                        'best_acc': best_acc
+                    }, epoch_checkpoint_path)
+                    logger.info(f"Saved checkpoint at epoch {epoch+1}")
                 
                 # 如果是最佳結果則儲存為最佳模型
                 if test_acc > best_acc:
                     best_acc = test_acc
-                    torch.save(model.module.state_dict(), f'swinv2_food101_best.pth')
+                    torch.save(model.module.state_dict(), os.path.join('outputs', 'swinv2_food101_best.pth'))
                     logger.info(f"New best model saved with accuracy: {test_acc:.2f}%")
+                    
+                    # 也保存一個帶有時間戳的最佳模型副本，避免被覆蓋
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    best_model_with_timestamp = os.path.join('outputs', f'swinv2_food101_best_{timestamp}_{test_acc:.2f}.pth')
+                    torch.save(model.module.state_dict(), best_model_with_timestamp)
             
             # 在epoch結束後確保所有進程同步
             try:
