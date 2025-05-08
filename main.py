@@ -236,7 +236,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, criterion, device, epoc
 
     accuracy = 100. * correct / total
     print(f"Train Loss: {total_loss / len(dataloader):.3f} | Train Accuracy: {accuracy:.2f}%")
-    return accuracy, total_loss / len(dataloader)
+    return accuracy, total_loss / len(dataloader
 
 
 def test_epoch(model, dataloader, criterion, device, logger=None):
@@ -258,7 +258,7 @@ def test_epoch(model, dataloader, criterion, device, logger=None):
 
     accuracy = 100. * correct / total
     print(f"Test Loss: {total_loss / len(dataloader):.3f} | Test Accuracy: {accuracy:.2f}%")
-    return accuracy, total_loss / len(dataloader)
+    return accuracy, total_loss / len(dataloader
 
 
 # Generate CAM for Swin Transformer V2
@@ -498,13 +498,13 @@ if __name__ == "__main__":
             transforms.RandomCrop(IMAGE_SIZE),  # 隨機裁剪以增加多樣性
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomRotation((-20, 20)),  # 修正: 使用元組而非單一整數
-            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.15),  # 增強顏色變化
-            transforms.RandomAffine(degrees=(-10, 10), translate=(0.15, 0.15), scale=(0.8, 1.2)),  # 修正: 使用元組表示角度範圍
-            transforms.RandomPerspective(distortion_scale=0.2, p=0.5),  # 增加透視變換
-            transforms.RandomGrayscale(p=0.05),  # 有機率轉為灰度圖
+            transforms.ColorJitter(brightness=(0.7, 1.3), contrast=(0.7, 1.3), saturation=(0.7, 1.3), hue=(-0.15, 0.15)),  # 修正: 使用元組表示範圍
+            transforms.RandomAffine(degrees=(-10, 10), translate=(0.15, 0.15), scale=(0.8, 1.2)),
+            transforms.RandomPerspective(distortion_scale=0.2, p=0.5),
+            transforms.RandomGrayscale(p=0.05),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            RandomErasing(p=0.3, scale=(0.02, 0.33), ratio=(0.3, 3.3))  # 增加擦除概率及範圍
+            RandomErasing(p=0.3, scale=(0.02, 0.33), ratio=(0.3, 3.3))
         ])
 
         # 測試集轉換強化，採用多尺度測試策略 (Test Time Augmentation)
@@ -740,10 +740,16 @@ if __name__ == "__main__":
                 if isinstance(t, transforms.ColorJitter):
                     # 循序漸進增加顏色抖動強度
                     factor = min(1.0, 0.5 + progress)  # 從0.5增加到1.0
-                    t.brightness = 0.3 * factor
-                    t.contrast = 0.3 * factor
-                    t.saturation = 0.3 * factor
-                    t.hue = 0.15 * factor
+                    # 修正: 使用元組格式設置 ColorJitter 參數
+                    brightness_factor = 0.3 * factor
+                    contrast_factor = 0.3 * factor
+                    saturation_factor = 0.3 * factor
+                    hue_factor = 0.15 * factor
+                    
+                    t.brightness = (max(0.7, 1.0 - brightness_factor), 1.0 + brightness_factor)
+                    t.contrast = (max(0.7, 1.0 - contrast_factor), 1.0 + contrast_factor)
+                    t.saturation = (max(0.7, 1.0 - saturation_factor), 1.0 + saturation_factor)
+                    t.hue = (-hue_factor, hue_factor)
                 elif isinstance(t, transforms.RandomRotation):
                     # 增加旋轉角度 - 修正：使用元組格式
                     t.degrees = (-int(10 + 10 * progress), int(10 + 10 * progress))  # 從±10度增加到±20度
