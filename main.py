@@ -236,7 +236,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, criterion, device, epoc
 
     accuracy = 100. * correct / total
     print(f"Train Loss: {total_loss / len(dataloader):.3f} | Train Accuracy: {accuracy:.2f}%")
-    return accuracy, total_loss / len(dataloader
+    return accuracy, total_loss / len(dataloader)
 
 
 def test_epoch(model, dataloader, criterion, device, logger=None):
