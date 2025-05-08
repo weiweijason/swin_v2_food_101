@@ -561,7 +561,7 @@ if __name__ == "__main__":
         )
 
         # 使用更好的模型規格
-        MODEL_SIZE = "base"  # 使用 base 模型作為基礎，平衡性能和效率
+        MODEL_SIZE = "large"  # 使用 base 模型作為基礎，平衡性能和效率
 
         # 根據模型規格初始化 SwinV2 模型
         logger.info(f"使用 {MODEL_SIZE} 規格的 Swin Transformer V2 模型")
