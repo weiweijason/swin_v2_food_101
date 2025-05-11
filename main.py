@@ -421,16 +421,16 @@ if __name__ == "__main__":
         except Exception as e:
             logger.warning(f"Initial synchronization failed: {e}")
 
-        # 更新參數設置 - 更新配置以提高精確度
-        BATCH_SIZE = 32  # 增大批次大小以獲得更穩定的梯度
-        IMAGE_SIZE = 224  # 增加圖像尺寸以提高特徵提取能力
-        WINDOW_SIZE = 7  # 設置窗口大小為圖像尺寸的約1/32
-        NUM_EPOCHS = 50  # 增加訓練輪數
+        # 更新參數設置 - 調整配置以改進現有模型
+        BATCH_SIZE = 32  # 保持批次大小不變以維持穩定性
+        IMAGE_SIZE = 224  # 保持圖像尺寸不變
+        WINDOW_SIZE = 12  # 增加窗口大小以捕捉更大範圍的特徵
+        NUM_EPOCHS = 80  # 大幅增加訓練輪數，給新參數足夠的學習時間
         IMAGE_ROOT = "food-101/images"
         TRAIN_FILE = "food-101/meta/train.txt"
         TEST_FILE = "food-101/meta/test.txt"
-        GRAD_ACCUM_STEPS = 1  # 減少梯度累積以更頻繁更新模型
-        WARMUP_EPOCHS = 3  # 減少預熱時間
+        GRAD_ACCUM_STEPS = 1  # 保持梯度累積步數不變
+        WARMUP_EPOCHS = 2  # 縮短預熱時間
 
         # 設置預訓練權重路徑為指定的 large 模型
         PRETRAINED_WEIGHTS = "swinv2_large_patch4_window12_192_22k.pth"
@@ -539,19 +539,19 @@ if __name__ == "__main__":
             'waffles'
         ]
 
-        # 大幅增強訓練集增強策略，採用更強力的數據增強來增加泛化能力
+        # 減輕訓練集增強策略，降低增強強度以避免過度正則化
         train_transform = transforms.Compose([
-            transforms.Resize((IMAGE_SIZE+32, IMAGE_SIZE+32)),  # 先放大圖像
-            transforms.RandomCrop(IMAGE_SIZE),  # 隨機裁剪以增加多樣性
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation((-20, 20)),  # 修正: 使用元組而非單一整數
-            transforms.ColorJitter(brightness=(0.7, 1.3), contrast=(0.7, 1.3), saturation=(0.7, 1.3), hue=(-0.15, 0.15)),  # 修正: 使用元組表示範圍
-            transforms.RandomAffine(degrees=(-10, 10), translate=(0.15, 0.15), scale=(0.8, 1.2)),
-            transforms.RandomPerspective(distortion_scale=0.2, p=0.5),
-            transforms.RandomGrayscale(p=0.05),
+            transforms.Resize((IMAGE_SIZE+20, IMAGE_SIZE+20)),  # 減少放大幅度
+            transforms.RandomCrop(IMAGE_SIZE),  # 保留隨機裁剪
+            transforms.RandomHorizontalFlip(p=0.5),  # 保留水平翻轉
+            transforms.RandomRotation((-10, 10)),  # 減少旋轉角度
+            transforms.ColorJitter(brightness=(0.8, 1.2), contrast=(0.8, 1.2), saturation=(0.8, 1.2), hue=(-0.1, 0.1)),  # 降低顏色變化強度
+            transforms.RandomAffine(degrees=(-5, 5), translate=(0.1, 0.1), scale=(0.9, 1.1)),  # 降低仿射變換強度
+            transforms.RandomPerspective(distortion_scale=0.1, p=0.3),  # 降低透視變換強度和概率
+            transforms.RandomGrayscale(p=0.02),  # 降低灰度轉換概率
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            RandomErasing(p=0.3, scale=(0.02, 0.33), ratio=(0.3, 3.3))
+            RandomErasing(p=0.2, scale=(0.02, 0.2), ratio=(0.3, 3.3))  # 降低擦除概率和面積
         ])
 
         # 測試集轉換強化，採用多尺度測試策略 (Test Time Augmentation)
@@ -562,15 +562,15 @@ if __name__ == "__main__":
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         
-        # 設置 Mixup 和 Cutmix，但減小混合強度以避免過度混淆類別
+        # 設置 Mixup 和 Cutmix，降低混合強度以使訓練更穩定
         mixup_args = {
-            'mixup_alpha': 0.2,  # 降低 mixup alpha 以保持更多原始標籤信息
-            'cutmix_alpha': 0.2,  # 降低 cutmix alpha 
+            'mixup_alpha': 0.1,   # 大幅降低mixup強度
+            'cutmix_alpha': 0.1,  # 大幅降低cutmix強度
             'cutmix_minmax': None,
-            'prob': 0.6,  # 增加使用概率以提高訓練多樣性
-            'switch_prob': 0.3,
+            'prob': 0.4,          # 降低使用概率
+            'switch_prob': 0.2,   # 降低切換概率
             'mode': 'batch',
-            'label_smoothing': 0.05,  # 減少標籤平滑強度，避免模型過度自信
+            'label_smoothing': 0.03,  # 降低標籤平滑強度
             'num_classes': len(LABELS)
         }
         mixup_fn = Mixup(**mixup_args)
@@ -612,14 +612,13 @@ if __name__ == "__main__":
 
         # 根據模型規格初始化 SwinV2 模型
         logger.info(f"使用 {MODEL_SIZE} 規格的 Swin Transformer V2 模型")
-        
         if (MODEL_SIZE == "tiny"):
             model = swin_transformer_v2_tiny_classifier(
                 input_resolution=(IMAGE_SIZE, IMAGE_SIZE),
                 window_size=WINDOW_SIZE,
                 num_classes=len(LABELS),
                 use_checkpoint=True,
-                dropout_path=0.3  # 增加 dropout 以提高泛化能力
+                dropout_path=0.2  # 降低 dropout 以減少正則化強度
             )
         elif (MODEL_SIZE == "small"):
             model = swin_transformer_v2_small_classifier(
@@ -627,7 +626,7 @@ if __name__ == "__main__":
                 window_size=WINDOW_SIZE,
                 num_classes=len(LABELS),
                 use_checkpoint=True,
-                dropout_path=0.3
+                dropout_path=0.2
             )
         elif (MODEL_SIZE == "large"):
             model = swin_transformer_v2_large_classifier(
@@ -635,7 +634,7 @@ if __name__ == "__main__":
                 window_size=WINDOW_SIZE,
                 num_classes=len(LABELS),
                 use_checkpoint=True,
-                dropout_path=0.3
+                dropout_path=0.2  # 降低 dropout 以減少正則化強度
             )
         else:  # 默認使用 base 模型
             model = swin_transformer_v2_base_classifier(
@@ -643,7 +642,7 @@ if __name__ == "__main__":
                 window_size=WINDOW_SIZE,
                 num_classes=len(LABELS),
                 use_checkpoint=True,
-                dropout_path=0.3
+                dropout_path=0.2
             )
 
         # 使用預訓練權重，更好地初始化模型
@@ -697,13 +696,12 @@ if __name__ == "__main__":
                 backbone_params.append(param)
             else:
                 head_params.append(param)
-        
-        param_groups = [
-            {'params': backbone_params, 'lr': 5e-6, 'weight_decay': 0.02},  # 較小的學習率和權重衰減
-            {'params': head_params, 'lr': 5e-5, 'weight_decay': 0.05}       # 較大的學習率和權重衰減
+                param_groups = [
+            {'params': backbone_params, 'lr': 1e-5, 'weight_decay': 0.01},  # 提高學習率，降低權重衰減
+            {'params': head_params, 'lr': 1e-4, 'weight_decay': 0.03}       # 提高學習率，降低權重衰減
         ]
         
-        # 優化器設置 - 分層學習率AdamW
+        # 優化器設置 - 保持 AdamW 但調整參數
         optimizer = optim.AdamW(
             param_groups,
             eps=1e-8,
@@ -716,17 +714,16 @@ if __name__ == "__main__":
         # 使用mixup時的SoftTarget損失
         criterion_train = SoftTargetCrossEntropy()
         criterion_test = nn.CrossEntropyLoss()  # 測試時使用標準損失
-        
-        # 使用帶有預熱和余弦退火的學習率調度器
+          # 使用帶有預熱和余弦退火的學習率調度器，但調整參數
         scheduler = CosineLRScheduler(
             optimizer,
             t_initial=NUM_EPOCHS,
-            lr_min=1e-7,        # 較低的最小學習率以避免過早收斂
-            warmup_t=5,         # 5個epoch的預熱期
-            warmup_lr_init=1e-7, # 從很小的學習率開始
+            lr_min=1e-6,         # 提高最小學習率以避免過早停止學習
+            warmup_t=2,          # 縮短預熱期
+            warmup_lr_init=1e-6, # 提高初始預熱學習率
             cycle_limit=1,
             t_in_epochs=True,
-            warmup_prefix=True  # 確保預熱期不計入余弦衰減週期
+            warmup_prefix=True
         )
 
         # 初始化混合精度訓練的scaler
@@ -762,57 +759,56 @@ if __name__ == "__main__":
         checkpoint_dir = "checkpoints"
         os.makedirs(checkpoint_dir, exist_ok=True)
         logger.info(f"確保檢查點目錄 {checkpoint_dir} 存在")
-        
-        # 從最後一個檢查點開始訓練
+          # 從最後一個檢查點開始訓練
         start_epoch = 0
         best_acc = 0
         
-        # 嘗試加載最新的檢查點
+        # 嘗試加載最新的檢查點，但僅加載模型權重，重置訓練狀態
         latest_checkpoint_path = os.path.join(checkpoint_dir, "latest_checkpoint.pth")
         if os.path.exists(latest_checkpoint_path):
-            logger.info(f"Loading latest checkpoint: {latest_checkpoint_path}")
+            logger.info(f"Loading model weights from latest checkpoint: {latest_checkpoint_path}")
             try:
                 checkpoint = torch.load(latest_checkpoint_path, map_location=device)
+                # 僅加載模型權重，不加載訓練狀態
                 model.module.load_state_dict(checkpoint['model_state_dict'])
-                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-                if 'scaler_state_dict' in checkpoint:
-                    scaler.load_state_dict(checkpoint['scaler_state_dict'])
-                start_epoch = checkpoint['epoch'] + 1
+                # 不恢復optimizer、scheduler狀態，使用新的初始化參數
+                # 不設置start_epoch，從頭開始計算epoch
+                # 保留best_acc以便於比較
                 best_acc = checkpoint['best_acc']
-                logger.info(f"Latest checkpoint loaded. Resuming from epoch {start_epoch}")
+                logger.info(f"Latest checkpoint model weights loaded. Starting with new parameters, best_acc: {best_acc}")
             except Exception as e:
                 logger.warning(f"Failed to load latest checkpoint: {e}")
-        
-        # 實現漸進式學習 - 隨著訓練進行增加數據增強強度
+                logger.warning("Will start training from scratch.")
+          # 實現漸進式學習 - 調整為更溫和的漸進式增加
         def adjust_augmentation_strength(transform, epoch, total_epochs):
-            """隨著訓練進行調整數據增強強度"""
+            """隨著訓練進行調整數據增強強度，但使用更溫和的增強曲線"""
             progress = epoch / total_epochs
-            # 開始時使用較溫和的增強，後期使用更強的增強
+            # 開始時使用較溫和的增強，後期微調增強強度
             for t in transform.transforms:
                 if isinstance(t, transforms.ColorJitter):
-                    # 循序漸進增加顏色抖動強度
-                    factor = min(1.0, 0.5 + progress)  # 從0.5增加到1.0
-                    # 修正: 使用元組格式設置 ColorJitter 參數
-                    brightness_factor = 0.3 * factor
-                    contrast_factor = 0.3 * factor
-                    saturation_factor = 0.3 * factor
-                    hue_factor = 0.15 * factor
+                    # 較小幅度調整顏色抖動強度
+                    factor = min(1.0, 0.7 + progress * 0.3)  # 從0.7增加到1.0，更緩和的曲線
+                    brightness_factor = 0.2 * factor
+                    contrast_factor = 0.2 * factor
+                    saturation_factor = 0.2 * factor
+                    hue_factor = 0.1 * factor
                     
-                    t.brightness = (max(0.7, 1.0 - brightness_factor), 1.0 + brightness_factor)
-                    t.contrast = (max(0.7, 1.0 - contrast_factor), 1.0 + contrast_factor)
-                    t.saturation = (max(0.7, 1.0 - saturation_factor), 1.0 + saturation_factor)
+                    t.brightness = (max(0.8, 1.0 - brightness_factor), 1.0 + brightness_factor)
+                    t.contrast = (max(0.8, 1.0 - contrast_factor), 1.0 + contrast_factor)
+                    t.saturation = (max(0.8, 1.0 - saturation_factor), 1.0 + saturation_factor)
                     t.hue = (-hue_factor, hue_factor)
                 elif isinstance(t, transforms.RandomRotation):
-                    # 增加旋轉角度 - 修正：使用元組格式
-                    t.degrees = (-int(10 + 10 * progress), int(10 + 10 * progress))  # 從±10度增加到±20度
+                    # 較小的旋轉角度調整
+                    max_angle = 5 + 5 * progress  # 從5度增加到10度
+                    t.degrees = (-int(max_angle), int(max_angle))
                 elif isinstance(t, transforms.RandomAffine):
-                    # 增加變形強度 - 修正：使用元組格式
-                    t.degrees = (-int(5 + 5 * progress), int(5 + 5 * progress))  # 從±5度增加到±10度
-                    t.translate = (0.1 + 0.05 * progress, 0.1 + 0.05 * progress)
+                    # 溫和的仿射變換調整
+                    max_angle = 3 + 2 * progress  # 從3度增加到5度
+                    t.degrees = (-int(max_angle), int(max_angle))
+                    t.translate = (0.08 + 0.02 * progress, 0.08 + 0.02 * progress)  # 從0.08增加到0.1
                 elif isinstance(t, RandomErasing):
-                    # 增加擦除概率
-                    t.p = 0.2 + 0.1 * progress  # 從0.2增加到0.3
+                    # 小幅增加擦除概率
+                    t.p = 0.15 + 0.05 * progress  # 從0.15增加到0.2
         
         # 實現更高效的測試函數，使用測試時數據增強 (TTA)
         def test_with_tta(model, dataloader, criterion, device, num_augments=3):
