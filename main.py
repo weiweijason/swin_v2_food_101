@@ -419,21 +419,17 @@ if __name__ == "__main__":
             synchronize()
             logger.info("Initial synchronization successful")
         except Exception as e:
-            logger.warning(f"Initial synchronization failed: {e}")
-
-        # 更新參數設置 - 調整配置以改進現有模型
-        BATCH_SIZE = 32  # 保持批次大小不變以維持穩定性
-        IMAGE_SIZE = 224  # 保持圖像尺寸不變
+            logger.warning(f"Initial synchronization failed: {e}")        # 更新參數設置 - 調整配置以改進現有模型
+        BATCH_SIZE = 16  # 降低批次大小以減少記憶體使用
+        IMAGE_SIZE = 192  # 降低圖像尺寸以減少記憶體使用
         WINDOW_SIZE = 12  # 增加窗口大小以捕捉更大範圍的特徵
         NUM_EPOCHS = 80  # 大幅增加訓練輪數，給新參數足夠的學習時間
         IMAGE_ROOT = "food-101/images"
         TRAIN_FILE = "food-101/meta/train.txt"
         TEST_FILE = "food-101/meta/test.txt"
-        GRAD_ACCUM_STEPS = 1  # 保持梯度累積步數不變
-        WARMUP_EPOCHS = 2  # 縮短預熱時間
-
-        # 設置預訓練權重路徑為指定的 large 模型
-        PRETRAINED_WEIGHTS = "swinv2_large_patch4_window12_192_22k.pth"
+        GRAD_ACCUM_STEPS = 2  # 增加梯度累積步數，模擬更大批次
+        WARMUP_EPOCHS = 2  # 縮短預熱時間        # 設置預訓練權重路徑為指定的 base 模型
+        PRETRAINED_WEIGHTS = "swinv2_imagenet_pretrained.pth"
 
         LABELS = [
             'apple_pie',
@@ -605,10 +601,8 @@ if __name__ == "__main__":
             pin_memory=True,
             prefetch_factor=2,
             persistent_workers=True
-        )
-
-        # 使用更好的模型規格
-        MODEL_SIZE = "large"  # 使用 base 模型作為基礎，平衡性能和效率
+        )        # 使用更好的模型規格
+        MODEL_SIZE = "base"  # 降級到 base 模型以減少記憶體使用
 
         # 根據模型規格初始化 SwinV2 模型
         logger.info(f"使用 {MODEL_SIZE} 規格的 Swin Transformer V2 模型")
@@ -872,14 +866,68 @@ if __name__ == "__main__":
                 synchronize()
             except:
                 logger.warning("Failed to synchronize before training epoch")
-            
-            # 訓練一個epoch
+          # 訓練一個epoch
             try:
                 # 使用 mixup 和 cutmix 進行數據增強
-                train_acc, train_loss = train_epoch_with_mixup(
-                    model, train_loader, optimizer, scheduler, criterion_train, 
-                    device, epoch, mixup_fn
-                )
+                train_acc, train_loss = 0, 0
+                running_loss = 0
+                correct = 0
+                total = 0
+                
+                model.train()
+                
+                # 啟用梯度累積
+                for i, (inputs, targets) in enumerate(tqdm(train_loader, desc="Training with Mixup")):
+                    inputs, targets = inputs.to(device), targets.to(device)
+                    
+                    # 應用 mixup 或 cutmix 變換
+                    if mixup_fn is not None:
+                        inputs, targets = mixup_fn(inputs, targets)
+                    
+                    # 在每個梯度累積週期的開始清空梯度
+                    if i % GRAD_ACCUM_STEPS == 0:
+                        optimizer.zero_grad()
+                    
+                    # 使用混合精度訓練
+                    with autocast():
+                        outputs = model(inputs)
+                        loss = criterion_train(outputs, targets)
+                        # 根據梯度累積步驟縮放損失
+                        loss = loss / GRAD_ACCUM_STEPS
+                    
+                    # 反向傳播
+                    scaler.scale(loss).backward()
+                    
+                    # 在梯度累積週期結束時更新參數
+                    if (i + 1) % GRAD_ACCUM_STEPS == 0 or (i + 1) == len(train_loader):
+                        # 梯度裁剪以增加穩定性
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                        
+                        # 更新參數
+                        scaler.step(optimizer)
+                        scaler.update()
+                    
+                    running_loss += loss.item() * GRAD_ACCUM_STEPS
+                    
+                    # 如果是混合標籤，使用最高概率的類別作為預測結果
+                    if mixup_fn is not None:
+                        _, predicted = outputs.max(1)
+                        _, targets_max = targets.max(1)  # 獲取混合標籤中最可能的類別
+                        total += targets.size(0)
+                        correct += predicted.eq(targets_max).sum().item()
+                    else:
+                        _, predicted = outputs.max(1)
+                        total += targets.size(0)
+                        correct += predicted.eq(targets).sum().item()
+                    
+                    # 每20批次釋放一次未使用的緩存
+                    if i % 20 == 0:
+                        torch.cuda.empty_cache()
+                
+                train_acc = 100. * correct / total
+                train_loss = running_loss / len(train_loader)
+                print(f"Train Loss: {train_loss:.3f} | Train Accuracy: {train_acc:.2f}%")
                 
                 # 在每個 epoch 後調用 scheduler.step()
                 scheduler.step(epoch)
@@ -913,10 +961,11 @@ if __name__ == "__main__":
                 synchronize()
             except:
                 logger.warning("Failed to synchronize before evaluation")
-            
-            # 使用測試時增強進行評估
+              # 使用測試時增強進行評估
             try:
-                if epoch >= NUM_EPOCHS - 5:  # 在最後5個epoch使用TTA進行更精確的評估
+                # 減少測試費時，以避免過度使用GPU記憶體
+                test_loader.batch_size = BATCH_SIZE  # 測試時使用相同的批次大小
+                if epoch >= NUM_EPOCHS - 3:  # 只在最後3個epoch使用TTA進行更精確的評估
                     test_acc, test_loss = test_with_tta(model, test_loader, criterion_test, device)
                 else:
                     test_acc, test_loss = test_epoch(model, test_loader, criterion_test, device, logger)
