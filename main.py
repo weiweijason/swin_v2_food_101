@@ -591,17 +591,19 @@ if __name__ == "__main__":
             pin_memory=True, 
             drop_last=True,
             prefetch_factor=2,  # 降低預取因子以減少內存壓力
-            persistent_workers=True
-        )
+            persistent_workers=True        )
+        
         test_loader = DataLoader(
-            test_dataset, 
-            batch_size=BATCH_SIZE*2,  # 增加測試批次大小以加速評估
+            test_dataset,
+            batch_size=BATCH_SIZE,  # 使用與訓練相同的批次大小以減少內存使用
             sampler=test_sampler, 
             num_workers=6,
             pin_memory=True,
             prefetch_factor=2,
             persistent_workers=True
-        )        # 使用更好的模型規格
+        )
+        
+        # 使用更好的模型規格
         MODEL_SIZE = "base"  # 降級到 base 模型以減少記憶體使用
 
         # 根據模型規格初始化 SwinV2 模型
@@ -960,11 +962,9 @@ if __name__ == "__main__":
             try:
                 synchronize()
             except:
-                logger.warning("Failed to synchronize before evaluation")
-              # 使用測試時增強進行評估
+                logger.warning("Failed to synchronize before evaluation")            # 使用測試時增強進行評估
             try:
-                # 減少測試費時，以避免過度使用GPU記憶體
-                test_loader.batch_size = BATCH_SIZE  # 測試時使用相同的批次大小
+                # 不要嘗試修改已初始化的 DataLoader 的 batch_size
                 if epoch >= NUM_EPOCHS - 3:  # 只在最後3個epoch使用TTA進行更精確的評估
                     test_acc, test_loss = test_with_tta(model, test_loader, criterion_test, device)
                 else:
