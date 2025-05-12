@@ -604,7 +604,7 @@ if __name__ == "__main__":
         )
         
         # 使用更好的模型規格
-        MODEL_SIZE = "base"  # 降級到 base 模型以減少記憶體使用
+        MODEL_SIZE = "large"  # 降級到 base 模型以減少記憶體使用
 
         # 根據模型規格初始化 SwinV2 模型
         logger.info(f"使用 {MODEL_SIZE} 規格的 Swin Transformer V2 模型")
