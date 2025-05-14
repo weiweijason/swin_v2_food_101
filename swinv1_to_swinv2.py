@@ -369,7 +369,7 @@ if __name__ == "__main__":
         # 使用 timm 加載 Swin V2 模型
         try:
             # 嘗試使用與預訓練權重匹配的模型設置
-            model = timm.create_model('swinv2_base_patch4_window12_192.ms_in22k', pretrained=True, num_classes=len(LABELS))
+            model = timm.create_model('swinv2_base_patch4_window12_192_22k', pretrained=True, num_classes=len(LABELS))
             print("成功加載 swinv2_base_patch4_window12_192_22k 預訓練模型")
         except Exception as e:
             print(f"無法加載 Swin V2 模型: {e}")
