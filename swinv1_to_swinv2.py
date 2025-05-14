@@ -201,7 +201,7 @@ def visualize_cam(image, cam):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train Swin V2 model with simplified settings')
     parser.add_argument('--batch_size', type=int, default=32, help='batch size for training')
-    parser.add_argument('--image_size', type=int, default=224, help='image size')
+    parser.add_argument('--image_size', type=int, default=192, help='image size (192 for SwinV2 with window12)')
     parser.add_argument('--epochs', type=int, default=30, help='number of epochs')
     parser.add_argument('--data_root', type=str, default='food-101', help='data root directory')
     parser.add_argument('--use_v2', action='store_true', help='use Swin V2 instead of V1')
@@ -363,16 +363,17 @@ if __name__ == "__main__":
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     num_epochs = args.epochs
-    
-    # 選擇使用 Swin V1 或 V2
+      # 選擇使用 Swin V1 或 V2
     if args.use_v2:
         print("使用 Swin Transformer V2 模型")
         # 使用 timm 加載 Swin V2 模型
         try:
-            model = timm.create_model('swinv2_base_window7_224_22k', pretrained=True, num_classes=len(LABELS))
-            print("成功加載 swinv2_base_window12_192_22k 預訓練模型")
-        except:
-            print("無法加載 Swin V2 模型，嘗試使用 Swin V1 替代...")
+            # 嘗試使用與預訓練權重匹配的模型設置
+            model = timm.create_model('swinv2_base_patch4_window12_192.ms_in22k', pretrained=True, num_classes=len(LABELS))
+            print("成功加載 swinv2_base_patch4_window12_192_22k 預訓練模型")
+        except Exception as e:
+            print(f"無法加載 Swin V2 模型: {e}")
+            print("嘗試使用 Swin V1 替代...")
             model = timm.create_model('swin_base_patch4_window7_224', pretrained=True, num_classes=len(LABELS))
     else:
         print("使用 Swin Transformer V1 模型")

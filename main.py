@@ -420,16 +420,17 @@ if __name__ == "__main__":
             synchronize()
             logger.info("Initial synchronization successful")
         except Exception as e:
-            logger.warning(f"Initial synchronization failed: {e}")        # 更新參數設置 - 調整配置以改進現有模型        BATCH_SIZE = 32  # 增加批次大小以匹配swinv1.py
-        IMAGE_SIZE = 224  # 增加圖像尺寸以捕捉更多細節，匹配swinv1.py
-        WINDOW_SIZE = 7   # 使用與swinv1.py相同的窗口大小
+            logger.warning(f"Initial synchronization failed: {e}")        # 更新參數設置 - 調整配置以改進現有模型
+        BATCH_SIZE = 32  # 增加批次大小以匹配swinv1.py
+        IMAGE_SIZE = 192  # 使用與預訓練權重匹配的圖像尺寸
+        WINDOW_SIZE = 12   # 使用與預訓練權重匹配的窗口大小
         NUM_EPOCHS = 50  # 減少訓練輪數，避免過擬合
         IMAGE_ROOT = "food-101/images"
         TRAIN_FILE = "food-101/meta/train.txt"
         TEST_FILE = "food-101/meta/test.txt"
         GRAD_ACCUM_STEPS = 2  # 增加梯度累積步數，模擬更大批次
-        WARMUP_EPOCHS = 2  # 縮短預熱時間        # 設置預訓練權重路徑為指定的 base 模型
-        PRETRAINED_WEIGHTS = "swinv2_imagenet_pretrained.pth"
+        WARMUP_EPOCHS = 2  # 縮短預熱時間        # 設置預訓練權重路徑為指定的權重文件
+        PRETRAINED_WEIGHTS = "swinv2_base_patch4_window12_192_22k.pth"
 
         LABELS = [
             'apple_pie',
