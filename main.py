@@ -29,6 +29,7 @@ import math
 from functools import partial
 import signal
 import traceback
+import timm  # 添加 timm 庫的導入
 
 # 設置 NCCL 超時環境變數
 os.environ["NCCL_BLOCKING_WAIT"] = "1"  # 使用阻塞等待模式，提高穩定性
@@ -419,11 +420,10 @@ if __name__ == "__main__":
             synchronize()
             logger.info("Initial synchronization successful")
         except Exception as e:
-            logger.warning(f"Initial synchronization failed: {e}")        # 更新參數設置 - 調整配置以改進現有模型
-        BATCH_SIZE = 16  # 降低批次大小以減少記憶體使用
-        IMAGE_SIZE = 192  # 降低圖像尺寸以減少記憶體使用
-        WINDOW_SIZE = 12  # 增加窗口大小以捕捉更大範圍的特徵
-        NUM_EPOCHS = 80  # 大幅增加訓練輪數，給新參數足夠的學習時間
+            logger.warning(f"Initial synchronization failed: {e}")        # 更新參數設置 - 調整配置以改進現有模型        BATCH_SIZE = 32  # 增加批次大小以匹配swinv1.py
+        IMAGE_SIZE = 224  # 增加圖像尺寸以捕捉更多細節，匹配swinv1.py
+        WINDOW_SIZE = 7   # 使用與swinv1.py相同的窗口大小
+        NUM_EPOCHS = 50  # 減少訓練輪數，避免過擬合
         IMAGE_ROOT = "food-101/images"
         TRAIN_FILE = "food-101/meta/train.txt"
         TEST_FILE = "food-101/meta/test.txt"
@@ -533,43 +533,20 @@ if __name__ == "__main__":
             'tiramisu',
             'tuna_tartare',
             'waffles'
-        ]
-
-        # 減輕訓練集增強策略，降低增強強度以避免過度正則化
+        ]        # 簡化訓練集增強策略，類似於swinv1.py的簡單轉換
         train_transform = transforms.Compose([
-            transforms.Resize((IMAGE_SIZE+20, IMAGE_SIZE+20)),  # 減少放大幅度
-            transforms.RandomCrop(IMAGE_SIZE),  # 保留隨機裁剪
-            transforms.RandomHorizontalFlip(p=0.5),  # 保留水平翻轉
-            transforms.RandomRotation((-10, 10)),  # 減少旋轉角度
-            transforms.ColorJitter(brightness=(0.8, 1.2), contrast=(0.8, 1.2), saturation=(0.8, 1.2), hue=(-0.1, 0.1)),  # 降低顏色變化強度
-            transforms.RandomAffine(degrees=(-5, 5), translate=(0.1, 0.1), scale=(0.9, 1.1)),  # 降低仿射變換強度
-            transforms.RandomPerspective(distortion_scale=0.1, p=0.3),  # 降低透視變換強度和概率
-            transforms.RandomGrayscale(p=0.02),  # 降低灰度轉換概率
+            transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+            transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            RandomErasing(p=0.2, scale=(0.02, 0.2), ratio=(0.3, 3.3))  # 降低擦除概率和面積
-        ])
-
-        # 測試集轉換強化，採用多尺度測試策略 (Test Time Augmentation)
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])        # 簡化測試集轉換，與swinv1.py保持一致
         test_transform = transforms.Compose([
-            transforms.Resize((IMAGE_SIZE+32, IMAGE_SIZE+32)),  # 先放大圖像
-            transforms.CenterCrop(IMAGE_SIZE),  # 中心裁剪確保評估一致性
+            transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
-        
-        # 設置 Mixup 和 Cutmix，降低混合強度以使訓練更穩定
-        mixup_args = {
-            'mixup_alpha': 0.1,   # 大幅降低mixup強度
-            'cutmix_alpha': 0.1,  # 大幅降低cutmix強度
-            'cutmix_minmax': None,
-            'prob': 0.4,          # 降低使用概率
-            'switch_prob': 0.2,   # 降低切換概率
-            'mode': 'batch',
-            'label_smoothing': 0.03,  # 降低標籤平滑強度
-            'num_classes': len(LABELS)
-        }
-        mixup_fn = Mixup(**mixup_args)
+          # 禁用 Mixup 和 Cutmix，使用標準訓練方式，類似於swinv1.py
+        mixup_fn = None
 
         encoder = Label_encoder(LABELS)
 
@@ -602,9 +579,8 @@ if __name__ == "__main__":
             prefetch_factor=2,
             persistent_workers=True
         )
-        
-        # 使用更好的模型規格
-        MODEL_SIZE = "large"  # 降級到 base 模型以減少記憶體使用
+          # 使用base模型，類似於swinv1.py中使用的模型
+        MODEL_SIZE = "base"
 
         # 根據模型規格初始化 SwinV2 模型
         logger.info(f"使用 {MODEL_SIZE} 規格的 Swin Transformer V2 模型")
@@ -679,49 +655,23 @@ if __name__ == "__main__":
             device_ids=[local_rank],
             find_unused_parameters=False,  # 關閉找尋未使用參數以提高訓練效率
             broadcast_buffers=False  # 保持關閉緩衝區廣播以減少通信量
-        )
-
-        # 採用分層學習率策略，微調時給不同層設置不同學習率
-        # 實現方式：給主幹網絡較小的學習率，給分類頭較大的學習率
-        backbone_params = []
-        head_params = []
-        
-        # 將參數分為主幹參數和頭部參數
-        for name, param in model.named_parameters():
-            if 'backbone' in name:
-                backbone_params.append(param)
-            else:
-                head_params.append(param)
-                param_groups = [
-            {'params': backbone_params, 'lr': 1e-5, 'weight_decay': 0.01},  # 提高學習率，降低權重衰減
-            {'params': head_params, 'lr': 1e-4, 'weight_decay': 0.03}       # 提高學習率，降低權重衰減
-        ]
-        
-        # 優化器設置 - 保持 AdamW 但調整參數
+        )        # 簡化優化器設置，使用單一學習率，類似於swinv1.py
         optimizer = optim.AdamW(
-            param_groups,
+            model.parameters(),
+            lr=2e-5,  # 使用與swinv1.py相同的學習率
             eps=1e-8,
             betas=(0.9, 0.999),
+            weight_decay=0.01  # 標準權重衰減
         )
+          # 使用簡單的餘弦退火學習率調度器，與swinv1.py相似
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, 
+            T_max=NUM_EPOCHS
+        )
+
+        # 使用標準交叉熵損失，與swinv1.py保持一致
+        criterion = nn.CrossEntropyLoss()
         
-        # 使用標籤平滑交叉熵損失以提高泛化能力
-        base_criterion = LabelSmoothingCrossEntropy(smoothing=0.1)
-
-        # 使用mixup時的SoftTarget損失
-        criterion_train = SoftTargetCrossEntropy()
-        criterion_test = nn.CrossEntropyLoss()  # 測試時使用標準損失
-          # 使用帶有預熱和余弦退火的學習率調度器，但調整參數
-        scheduler = CosineLRScheduler(
-            optimizer,
-            t_initial=NUM_EPOCHS,
-            lr_min=1e-6,         # 提高最小學習率以避免過早停止學習
-            warmup_t=2,          # 縮短預熱期
-            warmup_lr_init=1e-6, # 提高初始預熱學習率
-            cycle_limit=1,
-            t_in_epochs=True,
-            warmup_prefix=True
-        )
-
         # 初始化混合精度訓練的scaler
         scaler = GradScaler(
             init_scale=2**10,    # 使用較小的初始scale
@@ -735,16 +685,14 @@ if __name__ == "__main__":
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             tensorboard_dir = f'runs/swin_v2_food101_{timestamp}'
             writer = SummaryWriter(log_dir=tensorboard_dir)
-            logger.info(f"TensorBoard log directory: {tensorboard_dir}")
+            logger.info(f"TensorBoard log directory: {tensorboard_dir}")            
             logger.info(f"Training with:")
             logger.info(f"- Image size: {IMAGE_SIZE}x{IMAGE_SIZE}")
             logger.info(f"- Window size: {WINDOW_SIZE}x{WINDOW_SIZE}")
             logger.info(f"- Batch size: {BATCH_SIZE}")
             logger.info(f"- Epochs: {NUM_EPOCHS}")
-            logger.info(f"- Augmentations: Advanced color jitter, perspective, affine transforms, etc.")
-            logger.info(f"- Learning rates: backbone {param_groups[0]['lr']}, head {param_groups[1]['lr']}")
-            logger.info(f"- Weight decay: backbone {param_groups[0]['weight_decay']}, head {param_groups[1]['weight_decay']}")
-            logger.info(f"- Stochastic depth: 0.3 (increased for better regularization)")
+            logger.info(f"- Learning rate: {optimizer.param_groups[0]['lr']}")
+            logger.info(f"- Weight decay: {optimizer.param_groups[0]['weight_decay']}")
         
         # 在訓練循環之前，創建必要的輸出目錄
         outputs_dir = "outputs"
@@ -881,10 +829,7 @@ if __name__ == "__main__":
                 # 啟用梯度累積
                 for i, (inputs, targets) in enumerate(tqdm(train_loader, desc="Training with Mixup")):
                     inputs, targets = inputs.to(device), targets.to(device)
-                    
-                    # 應用 mixup 或 cutmix 變換
-                    if mixup_fn is not None:
-                        inputs, targets = mixup_fn(inputs, targets)
+                      # 應用 mixup 或 cutmix 變換已被禁用
                     
                     # 在每個梯度累積週期的開始清空梯度
                     if i % GRAD_ACCUM_STEPS == 0:
@@ -893,7 +838,7 @@ if __name__ == "__main__":
                     # 使用混合精度訓練
                     with autocast():
                         outputs = model(inputs)
-                        loss = criterion_train(outputs, targets)
+                        loss = criterion(outputs, targets)
                         # 根據梯度累積步驟縮放損失
                         loss = loss / GRAD_ACCUM_STEPS
                     
@@ -922,8 +867,7 @@ if __name__ == "__main__":
                         _, predicted = outputs.max(1)
                         total += targets.size(0)
                         correct += predicted.eq(targets).sum().item()
-                    
-                    # 每20批次釋放一次未使用的緩存
+                      # 每20批次釋放一次未使用的緩存
                     if i % 20 == 0:
                         torch.cuda.empty_cache()
                 
@@ -932,8 +876,8 @@ if __name__ == "__main__":
                 print(f"Train Loss: {train_loss:.3f} | Train Accuracy: {train_acc:.2f}%")
                 
                 # 在每個 epoch 後調用 scheduler.step()
-                scheduler.step(epoch)
-                logger.info(f"Learning rate updated: {optimizer.param_groups[0]['lr']:.6f} (backbone), {optimizer.param_groups[1]['lr']:.6f} (head)")
+                scheduler.step()
+                logger.info(f"Learning rate updated: {optimizer.param_groups[0]['lr']:.6f}")
             except Exception as e:
                 logger.error(f"Error during training epoch: {e}")
                 logger.error(traceback.format_exc())
@@ -962,20 +906,14 @@ if __name__ == "__main__":
             try:
                 synchronize()
             except:
-                logger.warning("Failed to synchronize before evaluation")            # 使用測試時增強進行評估
-            try:
+                logger.warning("Failed to synchronize before evaluation")            # 使用測試時增強進行評估            try:
                 # 不要嘗試修改已初始化的 DataLoader 的 batch_size
-                if epoch >= NUM_EPOCHS - 3:  # 只在最後3個epoch使用TTA進行更精確的評估
-                    test_acc, test_loss = test_with_tta(model, test_loader, criterion_test, device)
-                else:
-                    test_acc, test_loss = test_epoch(model, test_loader, criterion_test, device, logger)
-            except Exception as e:
+                test_acc, test_loss = test_epoch(model, test_loader, criterion, device, logger)
                 logger.error(f"Error during evaluation: {e}")
                 logger.error(traceback.format_exc())
                 test_acc = 0.0
                 test_loss = float('nan')
-            
-            # 在主進程上記錄到TensorBoard
+              # 在主進程上記錄到TensorBoard
             if local_rank == 0:
                 # 記錄訓練和測試指標
                 writer.add_scalar('Loss/train', train_loss, epoch)
@@ -985,8 +923,7 @@ if __name__ == "__main__":
                 writer.add_scalar('Accuracy/test', test_acc, epoch)
                 
                 # 記錄學習率
-                writer.add_scalar('Learning_rate/backbone', optimizer.param_groups[0]['lr'], epoch)
-                writer.add_scalar('Learning_rate/head', optimizer.param_groups[1]['lr'], epoch)
+                writer.add_scalar('Learning_rate', optimizer.param_groups[0]['lr'], epoch)
                 
                 # 儲存最新檢查點
                 torch.save({
