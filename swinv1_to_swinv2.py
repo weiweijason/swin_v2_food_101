@@ -362,15 +362,14 @@ if __name__ == "__main__":
         test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    num_epochs = args.epochs
-      # 選擇使用 Swin V1 或 V2
+    num_epochs = args.epochs      # 選擇使用 Swin V1 或 V2
     if args.use_v2:
         print("使用 Swin Transformer V2 模型")
         # 使用 timm 加載 Swin V2 模型
         try:
-            # 嘗試使用與預訓練權重匹配的模型設置
-            model = timm.create_model('swinv2_base_patch4_window12_192_22k.pth' , pretrained=True, num_classes=len(LABELS))
-            print("成功加載 swinv2_base_patch4_window12_192_22k 預訓練模型")
+            # 使用正確的模型名稱 (根據 timm 提供的模型列表)
+            model = timm.create_model('swinv2_base_window12_192', pretrained=True, num_classes=len(LABELS))
+            print("成功加載 swinv2_base_window12_192 預訓練模型")
         except Exception as e:
             print(f"無法加載 Swin V2 模型: {e}")
             print("嘗試使用 Swin V1 替代...")
