@@ -1,6 +1,8 @@
 import torch
 import timm
 import argparse
+from PIL import Image
+import torchvision.transforms as transforms
 
 # 從 swinv1_to_swinv2.py 複製 LABELS 列表
 LABELS =  [
@@ -63,12 +65,6 @@ def test_load_model(model_name, pretrained_path=None, num_classes=len(LABELS)):
                     new_k = new_k.replace('backbone.', '', 1)
                 
                 # 嘗試進行一些常見的鍵名替換 (這部分可能需要根據您的 .pth 檔案來源進行調整)
-                # 例如: 'patch_embedding.linear_embedding.' -> 'patch_embed.proj.'
-                #       'patch_embedding.normalization.' -> 'patch_embed.norm.'
-                #       'stages.' -> 'layers.'
-                #       'downsample.linear_mapping.' -> 'downsample.reduction.'
-                #       'downsample.normalization.' -> 'downsample.norm.' (需小心，避免與 patch_embed.norm 混淆)
-
                 if 'patch_embedding.linear_embedding.' in new_k:
                     new_k = new_k.replace('patch_embedding.linear_embedding.', 'patch_embed.proj.')
                 elif 'patch_embedding.normalization.' in new_k:
@@ -79,17 +75,8 @@ def test_load_model(model_name, pretrained_path=None, num_classes=len(LABELS)):
                 
                 if 'downsample.linear_mapping.' in new_k:
                     new_k = new_k.replace('downsample.linear_mapping.', 'downsample.reduction.')
-                # 僅當 'downsample.normalization.' 出現在 'layers' 上下文時才替換，以避免與 'patch_embed.norm' 衝突
                 if 'layers' in new_k and 'downsample.normalization.' in new_k:
                      new_k = new_k.replace('downsample.normalization.', 'downsample.norm.')
-
-                # 關於 head 的處理:
-                # timm 模型期望 head 的鍵名為 'head.fc.weight' 和 'head.fc.bias' (或類似結構)
-                # 您的 .pth 檔案中有 'head.2.weight' 等。
-                # 如果 num_classes 與原始模型不同，timm 會自動創建新的 head，通常不需要載入舊 head 權重。
-                # 如果 num_classes 相同且您想載入 head 權重，則需要更精確的映射。
-                # 為簡化，此處我們不過濾 head 鍵，讓 load_state_dict (strict=False 時) 自行處理。
-                # 如果 strict=True 失敗，通常是因為 head 不匹配。
 
                 new_state_dict[new_k] = v
             
@@ -98,12 +85,10 @@ def test_load_model(model_name, pretrained_path=None, num_classes=len(LABELS)):
                 print(f"成功從 '{pretrained_path}' 載入模型 '{model_name}' 的權重 (經過鍵名轉換)。")
             except RuntimeError as e_strict:
                 print(f"使用 strict=True 載入轉換後的 state_dict 失敗: {e_strict}")
-                print("提示：這通常表示即使在調整前綴和一些常見名稱後，權重檔案的結構 (例如 Attention Block 或 Head 部分)")
+                print("提示：這通常表示即使在調整前綴和一些常見名稱後，權重檔案的結構")
                 print("仍然與 timm 的 SwinTransformerV2 模型架構存在根本差異。")
-                print("如果權重來自 SwinV1，則需要專門的轉換腳本。")
-                print("嘗試使用 strict=False 載入，這會忽略不匹配的鍵和大小不符的鍵 (請謹慎使用)：")
+                print("嘗試使用 strict=False 載入：")
                 
-                # 為了使用 strict=False，過濾掉在目標模型中不存在的鍵，以及大小不匹配的鍵
                 filtered_state_dict_for_strict_false = {}
                 model_state_keys = model.state_dict().keys()
                 for key_ckpt, val_ckpt in new_state_dict.items():
@@ -112,49 +97,94 @@ def test_load_model(model_name, pretrained_path=None, num_classes=len(LABELS)):
                             filtered_state_dict_for_strict_false[key_ckpt] = val_ckpt
                         else:
                             print(f"  警告: 權重 '{key_ckpt}' 的形狀不匹配。模型: {model.state_dict()[key_ckpt].shape}, 檔案: {val_ckpt.shape}. 將跳過此權重。")
-                    # else: # 不打印所有不存在的鍵，因為 strict=False 會自動忽略它們
-                        # print(f"  警告: 權重 '{key_ckpt}' 在目標模型中不存在。將被忽略。")
 
                 model.load_state_dict(filtered_state_dict_for_strict_false, strict=False)
                 print(f"已使用 strict=False 從 '{pretrained_path}' 載入模型 '{model_name}' 的權重。")
-                print("請檢查輸出，確認哪些權重被跳過或未載入。模型可能無法正常工作。")
+                print("請檢查輸出，確認哪些權重被跳過或未載入。")
 
         else:
             print(f"嘗試從 timm 載入預訓練模型 '{model_name}'...")
             model = timm.create_model(model_name, pretrained=True, num_classes=num_classes)
             print(f"成功從 timm 載入預訓練模型 '{model_name}'。")
         
-        # 打印模型結構以確認
-        # print("\n模型結構:")
-        # print(model)
         print(f"模型 '{model_name}' 已成功載入並配置了 {num_classes} 個輸出類別。")
         return model
 
     except Exception as e:
         print(f"載入模型 '{model_name}' 失敗: {e}")
-        if pretrained_path: # 僅當嘗試從本地檔案載入時提供額外提示
+        if pretrained_path:
             print("\n--- 載入失敗的可能原因與建議 ---")
-            print("1. 權重檔案的架構與 timm 模型不完全相容：")
-            print("   - 錯誤訊息中的 'Missing key(s)' 指出 timm 模型需要的層在您的權重檔中找不到。")
-            print("   - 錯誤訊息中的 'Unexpected key(s)' 指出您的權重檔中包含 timm 模型無法識別的層。")
-            print("   - 特別注意 'attn.relative_position_bias_table' (SwinV1 特徵) vs 'attn.logit_scale', 'attn.cpb_mlp' (timm SwinV2 特徵)。")
-            print("2. 權重檔案來源：")
-            print("   - 如果此權重是 SwinV1 模型的，您需要使用一個可靠的轉換腳本將其轉換為與 timm SwinV2 相容的格式。")
-            print("   - 如果是其他來源的 SwinV2 權重，其內部層命名可能與 timm 不同。")
-            print("3. 前綴問題：程式碼已嘗試移除 'module.' 和 'backbone.' 前綴，但可能還有其他前綴或命名差異。")
-            print("4. 分類頭 (Head) 不匹配：如果您的權重檔案包含一個與 timm 模型預期不同的分類頭，也會導致錯誤。")
-            print("建議：")
-            print("   - 仔細檢查權重檔案的來源和原始模型架構。")
-            print("   - 如果是 SwinV1，尋找或編寫一個針對 timm SwinV2 的轉換腳本。")
-            print("   - 仔細比對 'Missing' 和 'Unexpected' 鍵列表，嘗試手動或透過腳本進行更精確的鍵名映射。")
+            print("1. 權重檔案的架構與 timm 模型不完全相容。")
+            print("2. 權重檔案來源問題 (例如 SwinV1 vs SwinV2)。")
+            print("3. 前綴或命名差異。")
+            print("4. 分類頭 (Head) 不匹配。")
         return None
+
+def predict_image(model, image_path, labels, model_name):
+    """
+    使用載入的模型對單張圖片進行預測。
+
+    Args:
+        model: 已載入的 PyTorch 模型。
+        image_path (str): 要預測的圖片檔案路徑。
+        labels (list): 類別標籤列表。
+        model_name (str): 模型名稱，用於輔助決定預處理方式。
+    """
+    try:
+        img = Image.open(image_path).convert('RGB')
+        
+        # 獲取模型的預處理配置
+        # SwinV2 Base Window12 192x192 -> input_size = 192
+        # Swin Base Patch4 Window7 224x224 -> input_size = 224
+        input_size = 192 # 預設值，根據 swinv2_base_window12_192
+        if "224" in model_name: # 簡易判斷
+            input_size = 224
+        elif "384" in model_name:
+            input_size = 384
+
+        # 使用 timm 建議的轉換方式，如果模型有 pretrained_cfg
+        # 否則使用標準 ImageNet 轉換
+        try:
+            data_config = timm.data.resolve_data_config({}, model=model)
+            val_transforms = timm.data.create_transform(**data_config, is_training=False)
+        except Exception:
+            print("無法從模型獲取 data_config，使用標準轉換。")
+            val_transforms = transforms.Compose([
+                transforms.Resize(int(input_size / 0.875)), # 依照常見比例放大再裁切
+                transforms.CenterCrop(input_size),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
+        
+        img_tensor = val_transforms(img).unsqueeze(0) # 添加 batch 維度
+
+        model.eval() # 設定為評估模式
+        with torch.no_grad(): # 不計算梯度
+            outputs = model(img_tensor)
+            probabilities = torch.softmax(outputs, dim=1)
+            top_p, top_class_idx = probabilities.topk(1, dim=1) # 取最高機率的類別
+
+        predicted_label = labels[top_class_idx.item()]
+        confidence = top_p.item()
+
+        print("-" * 30)
+        print(f"圖片 '{image_path}' 的預測結果:")
+        print(f"  預測類別: {predicted_label}")
+        print(f"  信賴度: {confidence:.4f}")
+        print("-" * 30)
+
+    except FileNotFoundError:
+        print(f"錯誤: 找不到圖片檔案 '{image_path}'")
+    except Exception as e:
+        print(f"預測圖片時發生錯誤: {e}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='測試模型載入功能')
+    parser = argparse.ArgumentParser(description='測試模型載入與預測功能')
     parser.add_argument('--model_name', type=str, required=True, help='要測試的 timm 模型名稱 (例如 swinv2_base_window12_192 或 swin_base_patch4_window7_224)')
     parser.add_argument('--pretrained_path', type=str, default=None, help='(可選) 本地預訓練權重檔案的路徑 (.pth)')
     parser.add_argument('--num_classes', type=int, default=len(LABELS), help='模型的輸出類別數量')
+    parser.add_argument('--image_path', type=str, default=None, help='(可選) 要進行預測的圖片路徑')
     
     args = parser.parse_args()
 
@@ -171,19 +201,8 @@ if __name__ == "__main__":
     if loaded_model:
         print("-" * 30)
         print("模型載入測試成功！")
+        if args.image_path:
+            predict_image(loaded_model, args.image_path, LABELS, args.model_name)
     else:
         print("-" * 30)
         print("模型載入測試失敗。")
-
-    # 示例用法:
-    # 1. 測試載入 swinv1_to_swinv2.py 中使用的 Swin V2 模型 (使用 timm 預訓練權重)
-    # python load_model_test.py --model_name swinv2_base_window12_192
-    
-    # 2. 測試載入 swinv1_to_swinv2.py 中使用的 Swin V1 模型 (使用 timm 預訓練權重)
-    # python load_model_test.py --model_name swin_base_patch4_window7_224
-
-    # 3. 測試從本地 .pth 檔案載入 Swin V2 模型 (假設你有一個名為 'swinv2_food101_best.pth' 的檔案)
-    # python load_model_test.py --model_name swinv2_base_window12_192 --pretrained_path outputs/swinv2_food101_best.pth
-    
-    # 4. 測試載入一個不同的模型，例如 EfficientNet (使用 timm 預訓練權重)
-    # python load_model_test.py --model_name efficientnet_b0 --num_classes 1000
