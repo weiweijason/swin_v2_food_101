@@ -453,6 +453,13 @@ tensorboard --logdir=runs
 - 改進測試數據加載器配置，與訓練數據加載器保持一致的批次大小
 - 增強記憶體管理，確保評估階段不會出現內存不足問題
 
+### v1.3.2 (2025年5月19日)
+- 針對 `swinv1_to_swinv2.py` 腳本中的過度擬合問題進行了優化：
+    - 增強數據擴增：引入 `RandomResizedCrop`、`RandomRotation` 和 `ColorJitter`。
+    - 模型正則化：為 SwinV1 和 SwinV2 模型添加 `drop_rate=0.2` 和 `drop_path_rate=0.2`。
+    - 優化器調整：在 `AdamW` 優化器中明確設定 `weight_decay=0.01`。
+- 確保 TensorBoard 相關套件已安裝。
+
 ### v1.2.1 (2025年5月5日)
 - 修復窗口分割和合併問題，支援任意圖像尺寸與窗口大小組合
 - 修正張量連續性問題，解決非連續內存錯誤

@@ -356,9 +356,11 @@ if __name__ == "__main__":
         'waffles'
         ]
 
-    # 使用簡單的資料增強設置，與swinv1.py類似
+    # 使用更強的資料增強設置來對抗過度擬合
     transform = transforms.Compose([
-        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+        transforms.RandomResizedCrop(IMAGE_SIZE, scale=(0.7, 1.0), ratio=(0.75, 1.33)), # 調整以進行更積極的裁剪
+        transforms.RandomRotation(20),  # 增加旋轉角度
+        transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.15), # 增強顏色抖動
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -390,15 +392,18 @@ if __name__ == "__main__":
         # 使用 timm 加載 Swin V2 模型
         try:
             # 使用正確的模型名稱 (根據 timm 提供的模型列表)
-            model = timm.create_model('swinv2_base_window12_192', pretrained=True, num_classes=len(LABELS))
-            print("成功加載 swinv2_base_window12_192 預訓練模型")
+            # 加入 drop_rate 和 drop_path_rate 以減少過度擬合
+            model = timm.create_model('swinv2_base_window12_192', pretrained=True, num_classes=len(LABELS), drop_rate=0.2, drop_path_rate=0.2)
+            print("成功加載 swinv2_base_window12_192 預訓練模型 (帶有 dropout)")
         except Exception as e:
             print(f"無法加載 Swin V2 模型: {e}")
             print("嘗試使用 Swin V1 替代...")
-            model = timm.create_model('swin_base_patch4_window7_224', pretrained=True, num_classes=len(LABELS))
+            # 同樣為 Swin V1 加入 dropout
+            model = timm.create_model('swin_base_patch4_window7_224', pretrained=True, num_classes=len(LABELS), drop_rate=0.2, drop_path_rate=0.2)
     else:
         print("使用 Swin Transformer V1 模型")
-        model = timm.create_model('swin_base_patch4_window7_224', pretrained=True, num_classes=len(LABELS))
+        # 為 Swin V1 加入 dropout
+        model = timm.create_model('swin_base_patch4_window7_224', pretrained=True, num_classes=len(LABELS), drop_rate=0.2, drop_path_rate=0.2)
     
     model = model.to(device)
     
@@ -432,8 +437,8 @@ if __name__ == "__main__":
             else:
                 target_layer = model.layers[-1].blocks[-1].norm2
 
-    # 使用簡單的優化器設置
-    optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
+    # 使用簡單的優化器設置，並明確指定 weight_decay
+    optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5, weight_decay=0.01) # 明確加入 weight_decay
     criterion = nn.CrossEntropyLoss()
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 
