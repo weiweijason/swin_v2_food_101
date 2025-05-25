@@ -250,13 +250,12 @@ def test_epoch(model, dataloader, criterion, device, writer, epoch, image_size):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train Unsupervised Swin Transformer (V1/V2) with TensorBoard logging') # 更新描述
     parser.add_argument('--batch_size', type=int, default=32, help='batch size for training')
-    # 預設圖像大小調整為 224，因為 SwinV1 常用此大小，SwinV2 也有對應模型
     parser.add_argument('--image_size', type=int, default=224, help='image size (e.g., 224 for SwinV1, 192 or 256 for SwinV2 variants)')
-    parser.add_argument('--epochs', type=int, default=50, help='number of epochs') # 增加 epochs 數量，無監督可能需要更多訓練
+    parser.add_argument('--epochs', type=int, default=50, help='number of epochs')
     parser.add_argument('--data_root', type=str, default='food-101', help='data root directory')
     parser.add_argument('--use_v2', action='store_true', help='use Swin V2 encoder instead of V1')
     parser.add_argument('--distributed', action='store_true', help='use distributed training')
-    parser.add_argument('--learning_rate', type=float, default=1e-4, help='learning rate for AdamW') # 調整學習率
+    parser.add_argument('--learning_rate', type=float, default=1e-4, help='learning rate for AdamW')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='weight decay for AdamW')
 
     args = parser.parse_args()
@@ -264,9 +263,8 @@ if __name__ == "__main__":
     # 檢查是否使用分散式訓練
     use_distributed = args.distributed
     local_rank = 0
-    is_main_process = True # 預設為主進程
+    is_main_process = True
 
-    # 檢查環境變數，決定是否使用分散式訓練
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         use_distributed = True
         if not torch.distributed.is_initialized():
@@ -276,79 +274,92 @@ if __name__ == "__main__":
         is_main_process = (local_rank == 0)
         log_message(f"分散式訓練已初始化，local_rank: {local_rank}", is_main_process)
     else:
-        is_main_process = True # 在非分散式模式下，總是主進程
+        is_main_process = True
         log_message("使用單一GPU訓練模式", is_main_process)
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        log_message(f"使用設備: {device}", is_main_process)
+        # device variable will be set later, after IMAGE_SIZE is finalized
+
+    # --- 模型和圖像大小選擇邏輯 ---
+    IMAGE_SIZE_FROM_ARGS = args.image_size # 保存用戶原始請求的圖像大小
+    effective_image_size = IMAGE_SIZE_FROM_ARGS
+
+    if args.use_v2:
+        if IMAGE_SIZE_FROM_ARGS == 192:
+            encoder_model_name = 'swinv2_base_window12_192'
+            effective_image_size = 192
+        elif IMAGE_SIZE_FROM_ARGS == 256:
+            encoder_model_name = 'swinv2_base_window16_256'
+            effective_image_size = 256
+        else:
+            encoder_model_name = 'swinv2_base_window12_192' # 預設 SwinV2 模型
+            native_size = 192
+            if IMAGE_SIZE_FROM_ARGS != native_size:
+                log_message(f"警告: 您請求的圖像大小 {IMAGE_SIZE_FROM_ARGS}x{IMAGE_SIZE_FROM_ARGS} 與所選 SwinV2 模型 '{encoder_model_name}' 的原生輸入尺寸 {native_size}x{native_size} 不匹配。", is_main_process)
+                log_message(f"將使用模型原生輸入尺寸 {native_size}x{native_size} 進行訓練和數據處理。", is_main_process)
+                effective_image_size = native_size
+        log_message(f"使用 Swin Transformer V2 ({encoder_model_name}) 作為編碼器, 有效輸入尺寸: {effective_image_size}x{effective_image_size}", is_main_process)
+    else: # SwinV1
+        encoder_model_name = 'swin_base_patch4_window7_224' # 經典的 SwinV1
+        native_size = 224
+        if IMAGE_SIZE_FROM_ARGS != native_size:
+            log_message(f"警告: SwinV1 模型 '{encoder_model_name}' 通常使用 {native_size}x{native_size}。您的設定為 {IMAGE_SIZE_FROM_ARGS}x{IMAGE_SIZE_FROM_ARGS}。", is_main_process)
+            log_message(f"將使用模型原生輸入尺寸 {native_size}x{native_size} 進行訓練和數據處理。", is_main_process)
+            effective_image_size = native_size
+        log_message(f"使用 Swin Transformer V1 ({encoder_model_name}) 作為編碼器, 有效輸入尺寸: {effective_image_size}x{effective_image_size}", is_main_process)
+
+    # 更新 args.image_size 以反映將實際使用的尺寸，或使用新的 effective_image_size 變數
+    # 為了減少對後續代碼的更改，我們直接更新 IMAGE_SIZE 全局變數的概念
+    IMAGE_SIZE = effective_image_size
+    # --- 結束模型和圖像大小選擇邏輯 ---
 
     BATCH_SIZE = args.batch_size
-    IMAGE_SIZE = args.image_size
+    # IMAGE_SIZE is now set above
     IMAGE_ROOT = f"{args.data_root}/images"
     TRAIN_FILE = f"{args.data_root}/meta/train.txt"
     TEST_FILE = f"{args.data_root}/meta/test.txt"
+    
+    # 設定 device (在 IMAGE_SIZE 確定後，以防未來有依賴 IMAGE_SIZE 的 device 選擇)
+    if not use_distributed: # 如果是單 GPU 模式，在這裡設定 device
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        log_message(f"使用設備: {device}", is_main_process)
+    else: # 分散式模式下，device 在前面已經根據 local_rank 設定
+        device = torch.device(f"cuda:{local_rank}")
 
-    # LABELS =  [ ... ] # <--- 移除 LABELS 列表
 
-    # 使用更強的資料增強設置來對抗過度擬合
     transform = transforms.Compose([
         transforms.RandomResizedCrop(IMAGE_SIZE, scale=(0.7, 1.0), ratio=(0.75, 1.33)),
         transforms.RandomRotation(20),
         transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.15),
         transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(), # 將圖像轉換為張量，範圍 [0, 1]
-        # 移除了 transforms.Normalize，因為解碼器輸出使用 Sigmoid (0 到 1)
-        # transforms.Normalize(mean=[0.485, 0.456, 0.406],
-        #                      std=[0.229, 0.224, 0.225])
+        transforms.ToTensor(),
     ])
 
-    # encoder = Label_encoder(LABELS) # <--- 移除 encoder 實例化
+    train_df = prepare_dataframe(TRAIN_FILE, IMAGE_ROOT)
+    test_df = prepare_dataframe(TEST_FILE, IMAGE_ROOT)
 
-    train_df = prepare_dataframe(TRAIN_FILE, IMAGE_ROOT) # <--- 移除 encoder 參數
-    test_df = prepare_dataframe(TEST_FILE, IMAGE_ROOT)   # <--- 移除 encoder 參數
-
-    train_dataset = Food101Dataset(train_df, transform) # <--- 移除 encoder 參數
-    test_dataset = Food101Dataset(test_df, transform)   # <--- 移除 encoder 參數
+    train_dataset = Food101Dataset(train_df, transform)
+    test_dataset = Food101Dataset(test_df, transform)
 
     if use_distributed:
         train_sampler = DistributedSampler(train_dataset)
         test_sampler = DistributedSampler(test_dataset)
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler)
-        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, sampler=test_sampler)
-        device = torch.device(f"cuda:{local_rank}")
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler, num_workers=4, pin_memory=True)
+        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, sampler=test_sampler, num_workers=4, pin_memory=True)
+        # device is already set for distributed
     else:
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
+        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+        # device is already set for non-distributed
 
     num_epochs = args.epochs
     
-    # 根據選擇實例化 UnsupervisedSwin 模型
-    if args.use_v2:
-        # 根據 image_size 選擇合適的 SwinV2 模型
-        # 例如: swinv2_tiny_window8_256, swinv2_small_window8_256, swinv2_base_window12_192, swinv2_base_window16_256
-        # 這裡我們選擇一個與 image_size 較為匹配的，或者讓使用者透過參數指定更精確的模型名稱
-        if IMAGE_SIZE == 192:
-            encoder_model_name = 'swinv2_base_window12_192'
-        elif IMAGE_SIZE == 256:
-            encoder_model_name = 'swinv2_base_window16_256' # 或者 swinv2_small_window16_256 等
-        else: # 預設或如果 IMAGE_SIZE 不是標準的 SwinV2 尺寸，可以選擇一個通用或報錯
-            encoder_model_name = 'swinv2_base_window12_192' # 作為一個後備
-            log_message(f"警告: 圖像大小 {IMAGE_SIZE} 可能不是 SwinV2 模型 ({encoder_model_name}) 的最佳匹配。建議使用 192 或 256 等標準尺寸。", is_main_process)
-        log_message(f"使用 Swin Transformer V2 ({encoder_model_name}) 作為編碼器", is_main_process)
-    else:
-        # SwinV1 通常使用 224x224
-        if IMAGE_SIZE != 224:
-            log_message(f"警告: SwinV1 通常使用 224x224 的圖像大小，目前設定為 {IMAGE_SIZE}。", is_main_process)
-        encoder_model_name = 'swin_base_patch4_window7_224' # 經典的 SwinV1
-        log_message(f"使用 Swin Transformer V1 ({encoder_model_name}) 作為編碼器", is_main_process)
-
     try:
+        # IMAGE_SIZE 現在是 effective_image_size
         model = UnsupervisedSwin(encoder_model_name=encoder_model_name, image_size=IMAGE_SIZE, pretrained=True)
-        log_message(f"成功加載無監督模型，編碼器: {encoder_model_name}", is_main_process)
+        log_message(f"成功加載無監督模型，編碼器: {encoder_model_name}, 輸入尺寸 {IMAGE_SIZE}x{IMAGE_SIZE}", is_main_process)
     except Exception as e:
-        log_message(f"無法加載無監督 Swin 模型 ({encoder_model_name}): {e}", is_main_process)
-        log_message("請檢查 timm 是否已安裝且模型名稱是否正確。", is_main_process)
-        exit() # 如果模型無法加載，則退出
+        log_message(f"無法加載無監督 Swin 模型 ({encoder_model_name} for image size {IMAGE_SIZE}): {e}", is_main_process)
+        log_message("請檢查 timm 是否已安裝、模型名稱是否正確，以及圖像大小是否與模型兼容。", is_main_process)
+        exit()
 
     model = model.to(device)
     
