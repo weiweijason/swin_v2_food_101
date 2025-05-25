@@ -92,7 +92,13 @@ class UnsupervisedSwin(nn.Module):
         super().__init__()
         self.image_size = image_size
         # 載入 Swin Transformer 作為編碼器，num_classes=0 表示我們想要特徵而不是分類 logits
-        self.encoder = timm.create_model(encoder_model_name, pretrained=pretrained, num_classes=0, in_chans=in_chans)
+        self.encoder = timm.create_model(
+            encoder_model_name,
+            pretrained=pretrained,
+            num_classes=0,
+            in_chans=in_chans,
+            img_size=image_size # <--- Pass the image_size to configure the model's expected input size
+        )
         
         # 動態獲取編碼器的輸出特徵維度
         encoder_feature_dim = 0
