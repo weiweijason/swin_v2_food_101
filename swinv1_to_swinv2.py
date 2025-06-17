@@ -225,7 +225,8 @@ def visualize_cam(image, cam):
 
 # 主程序
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train Swin V2 model with simplified settings and TensorBoard logging') # 更新描述    parser.add_argument('--batch_size', type=int, default=32, help='batch size for training')
+    parser = argparse.ArgumentParser(description='Train Swin V2 model with simplified settings and TensorBoard logging')
+    parser.add_argument('--batch_size', type=int, default=32, help='batch size for training')
     parser.add_argument('--image_size', type=int, default=192, help='image size (192 for SwinV2 with window12)')
     parser.add_argument('--epochs', type=int, default=100, help='number of epochs (increased for training from scratch)')
     parser.add_argument('--data_root', type=str, default='food-101', help='data root directory')
