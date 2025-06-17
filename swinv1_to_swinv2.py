@@ -225,13 +225,13 @@ def visualize_cam(image, cam):
 
 # 主程序
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train Swin V2 model with simplified settings and TensorBoard logging') # 更新描述
-    parser.add_argument('--batch_size', type=int, default=32, help='batch size for training')
+    parser = argparse.ArgumentParser(description='Train Swin V2 model with simplified settings and TensorBoard logging') # 更新描述    parser.add_argument('--batch_size', type=int, default=32, help='batch size for training')
     parser.add_argument('--image_size', type=int, default=192, help='image size (192 for SwinV2 with window12)')
     parser.add_argument('--epochs', type=int, default=100, help='number of epochs (increased for training from scratch)')
     parser.add_argument('--data_root', type=str, default='food-101', help='data root directory')
     parser.add_argument('--use_v2', action='store_true', help='use Swin V2 instead of V1')
     parser.add_argument('--distributed', action='store_true', help='use distributed training')
+    parser.add_argument('--num_workers', type=int, default=4, help='number of data loading workers')
     args = parser.parse_args()
     
     # 檢查是否使用分散式訓練
@@ -385,12 +385,40 @@ if __name__ == "__main__":
     if use_distributed:
         train_sampler = DistributedSampler(train_dataset)
         test_sampler = DistributedSampler(test_dataset)
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler)
-        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, sampler=test_sampler)
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=BATCH_SIZE, 
+            sampler=train_sampler,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            persistent_workers=True if args.num_workers > 0 else False
+        )
+        test_loader = DataLoader(
+            test_dataset, 
+            batch_size=BATCH_SIZE, 
+            sampler=test_sampler,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            persistent_workers=True if args.num_workers > 0 else False
+        )
         device = torch.device(f"cuda:{local_rank}")
     else:
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=BATCH_SIZE, 
+            shuffle=True,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            persistent_workers=True if args.num_workers > 0 else False
+        )
+        test_loader = DataLoader(
+            test_dataset, 
+            batch_size=BATCH_SIZE, 
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            persistent_workers=True if args.num_workers > 0 else False
+        )
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     num_epochs = args.epochs      
@@ -569,6 +597,7 @@ if __name__ == "__main__":
             f.write(f"圖像大小: {IMAGE_SIZE}\n")
             f.write(f"批次大小: {BATCH_SIZE}\n")
             f.write(f"總輪數: {num_epochs}\n")
+            f.write(f"數據載入 Workers: {args.num_workers}\n")
             f.write(f"初始學習率: {optimizer.param_groups[0]['lr']}\n")
             f.write(f"權重衰減: {optimizer.param_groups[0]['weight_decay']}\n")
             f.write(f"Warmup輪數: {warmup_epochs}\n")
