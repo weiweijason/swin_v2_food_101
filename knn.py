@@ -56,7 +56,7 @@ if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     # 載入保存的模型
-    model_path = "output/unsupervised_swinv2_food101_best_loss.pth"
+    model_path = "outputs/unsupervised_swinv2_food101_best_loss.pth"
     model = torch.load(model_path, map_location=device)
     model.eval()
     model = model.to(device)
