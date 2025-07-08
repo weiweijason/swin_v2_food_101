@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 from PIL import Image
 import pandas as pd
 from sklearn.utils import shuffle
+import timm  # 確保您已安裝 timm 庫
 
 # 定義 Food101Dataset 類
 class Food101Dataset(torch.utils.data.Dataset):
@@ -55,11 +56,13 @@ if __name__ == "__main__":
     # 設定設備
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    # 載入保存的模型
-    model_path = "outputs/unsupervised_swinv2_food101_best_loss.pth"
-    model = torch.load(model_path, map_location=device)
-    model.eval()
+    # 定義模型結構
+    model = timm.create_model('swinv2_base_window12_192', pretrained=False, num_classes=0)  # num_classes=0 表示提取特徵
     model = model.to(device)
+
+    # 載入保存的權重
+    model_path = "unsupervised_swinv2_food101_best_loss.pth"
+    model.load_state_dict(torch.load(model_path, map_location=device))
 
     # 設定數據增強
     transform = transforms.Compose([
