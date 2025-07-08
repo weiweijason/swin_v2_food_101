@@ -62,7 +62,15 @@ if __name__ == "__main__":
 
     # 載入保存的權重
     model_path = "outputs/unsupervised_swinv2_food101_best_loss.pth"
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    state_dict = torch.load(model_path, map_location=device)
+
+    # 移除可能的 "module." 前綴
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        new_key = key.replace("module.", "")  # 移除 "module." 前綴
+        new_state_dict[new_key] = value
+
+    model.load_state_dict(new_state_dict)
 
     # 設定數據增強
     transform = transforms.Compose([
