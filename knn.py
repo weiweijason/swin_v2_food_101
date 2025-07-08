@@ -56,11 +56,21 @@ if __name__ == "__main__":
     # 設定設備
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    # 定義模型結構並載入保存的權重
-    model_path = "outputs/unsupervised_swinv2_food101_best_loss.pth"
+    # 定義模型結構
     model = timm.create_model('swinv2_base_window12_192', pretrained=False, num_classes=0)  # num_classes=0 表示提取特徵
-    model.load_state_dict(torch.load(model_path, map_location=device))
     model = model.to(device)
+
+    # 載入保存的權重
+    model_path = "outputs/unsupervised_swinv2_food101_best_loss.pth"
+    state_dict = torch.load(model_path, map_location=device)
+
+    # 移除可能的 "module." 前綴
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        new_key = key.replace("module.", "")  # 移除 "module." 前綴
+        new_state_dict[new_key] = value
+
+    model.load_state_dict(new_state_dict)
 
     # 設定數據增強
     transform = transforms.Compose([
