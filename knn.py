@@ -62,15 +62,13 @@ if __name__ == "__main__":
 
     # 載入保存的權重
     model_path = "outputs/unsupervised_swinv2_food101_best_loss.pth"
-    state_dict = torch.load(model_path, map_location=device)
-
-    # 移除可能的 "module." 前綴
-    new_state_dict = {}
-    for key, value in state_dict.items():
-        new_key = key.replace("module.", "")  # 移除 "module." 前綴
-        new_state_dict[new_key] = value
-
-    model.load_state_dict(new_state_dict)
+    try:
+        state_dict = torch.load(model_path, map_location=device)
+        model.load_state_dict(state_dict)
+    except RuntimeError as e:
+        print(f"載入模型權重時發生錯誤: {e}")
+        print("請確認保存的模型權重與模型結構一致。")
+        exit(1)
 
     # 設定數據增強
     transform = transforms.Compose([
