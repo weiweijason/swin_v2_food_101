@@ -61,7 +61,7 @@ if __name__ == "__main__":
     model = model.to(device)
 
     # 載入保存的權重
-    model_path = "unsupervised_swinv2_food101_best_loss.pth"
+    model_path = "outputs/unsupervised_swinv2_food101_best_loss.pth"
     model.load_state_dict(torch.load(model_path, map_location=device))
 
     # 設定數據增強
