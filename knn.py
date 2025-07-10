@@ -36,7 +36,9 @@ def extract_features(model, dataloader, device):
         for inputs in dataloader:
             inputs = inputs.to(device)
             outputs = model(inputs)
-            features.append(outputs.cpu().numpy())
+            # 將特徵展平為 [batch_size, feature_dim]
+            outputs_flat = outputs.view(outputs.size(0), -1)
+            features.append(outputs_flat.cpu().numpy())
     return np.concatenate(features)
 
 # 分群分析函數
@@ -63,7 +65,7 @@ if __name__ == "__main__":
     # 載入保存的權重
     model_path = "outputs/swinv2_food101_best.pth"  # 使用正確的檔案名稱
     try:
-        state_dict = torch.load(model_path, map_location=device)
+        state_dict = torch.load(model_path, map_location=device, weights_only=True)
 
         # 移除可能的 "module." 前綴
         new_state_dict = {}
@@ -110,10 +112,15 @@ if __name__ == "__main__":
     test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=4)
 
     # 提取特徵
+    print("開始提取特徵...")
     features = extract_features(model, test_loader, device)
+    print(f"提取的特徵形狀: {features.shape}")
 
     # 分群分析
+    print("開始進行 KMeans 分群...")
     reduced_features, cluster_labels = perform_kmeans_clustering(features, n_clusters=10)
+    print(f"降維後特徵形狀: {reduced_features.shape}")
+    print(f"分群標籤數量: {len(cluster_labels)}")
 
     # 可視化分群結果
     plt.scatter(reduced_features[:, 0], reduced_features[:, 1], c=cluster_labels, cmap='viridis')
