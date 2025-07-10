@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 import numpy as np
@@ -56,12 +57,11 @@ if __name__ == "__main__":
     # 設定設備
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    # 定義模型結構
-    model = timm.create_model('swinv2_base_window12_192', pretrained=False, num_classes=0)  # num_classes=0 表示提取特徵
-    model = model.to(device)
-
+    # 定義模型結構 - 必須與訓練時一致（101個分類）
+    model = timm.create_model('swinv2_base_window12_192', pretrained=False, num_classes=101)
+    
     # 載入保存的權重
-    model_path = "outputs/unsupervised_swinv2_food101_best_loss.pth"
+    model_path = "outputs/swinv2_food101_best.pth"  # 使用正確的檔案名稱
     try:
         state_dict = torch.load(model_path, map_location=device)
 
@@ -72,10 +72,15 @@ if __name__ == "__main__":
             new_state_dict[new_key] = value
 
         model.load_state_dict(new_state_dict)
+        print("模型權重載入成功！")
     except RuntimeError as e:
         print(f"載入模型權重時發生錯誤: {e}")
         print("請確認保存的模型權重與模型結構一致。")
         exit(1)
+    
+    # 修改模型以提取特徵（移除最後的分類層）
+    model = nn.Sequential(*list(model.children())[:-1])  # 移除最後的分類層
+    model = model.to(device)
 
     # 設定數據增強
     transform = transforms.Compose([
